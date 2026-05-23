@@ -1,0 +1,14 @@
+use async_trait::async_trait;
+{% for imp in extra_imports %}{{ imp }}
+{% endfor %}
+use crate::domain::{{ snake }}::{errors::{{ pascal }}Error, model::{{ pascal }}};
+
+#[derive(Debug, Clone)]
+pub struct Create{{ pascal }}Params {
+{% for f in params_fields %}    pub {{ f.name }}: {{ f.field_type }},
+{% endfor %}}
+
+#[async_trait]
+pub trait Create{{ pascal }}UseCaseTrait: Send + Sync {
+    async fn execute(&self, params: Create{{ pascal }}Params) -> Result<{{ pascal }}, {{ pascal }}Error>;
+}

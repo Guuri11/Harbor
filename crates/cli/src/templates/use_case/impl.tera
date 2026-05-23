@@ -1,0 +1,54 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    model::{{ pascal }},
+    repository::{{ pascal }}RepositoryTrait,
+    use_cases::{{ uc }}::{{ "{" }}{{ uc_pascal }}Params, {{ uc_pascal }}UseCaseTrait},
+};
+use crate::domain::logger::LoggerTrait;
+
+pub struct {{ uc_pascal }}UseCaseImpl {
+    pub repository: Arc<dyn {{ pascal }}RepositoryTrait>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[async_trait]
+impl {{ uc_pascal }}UseCaseTrait for {{ uc_pascal }}UseCaseImpl {
+    async fn execute(&self, params: {{ uc_pascal }}Params) -> Result<{{ pascal }}, {{ pascal }}Error> {
+        self.logger.info(&format!("Executing {{ uc }}: {:?}", params));
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{{ snake }}::repository::mocks::Mock{{ pascal }}Repository;
+    use crate::domain::logger::mocks::MockLogger;
+
+    fn silent_logger() -> MockLogger {
+        let mut mock = MockLogger::new();
+        mock.expect_info().returning(|_| ());
+        mock.expect_warn().returning(|_| ());
+        mock.expect_error().returning(|_| ());
+        mock.expect_debug().returning(|_| ());
+        mock
+    }
+
+    #[tokio::test]
+    async fn should_{{ uc }}_when_valid() {
+        // Arrange
+        let mock_repo = Mock{{ pascal }}Repository::new();
+        let use_case = {{ uc_pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        // Act
+        // TODO: implement test body
+        let _ = &use_case;
+    }
+}

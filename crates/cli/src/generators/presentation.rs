@@ -1,309 +1,14 @@
 use std::path::Path;
 
 use crate::generators::bootstrap::regenerate_bootstrap;
-use crate::generators::naming::{apply, pascal_to_snake, to_pascal_case, write_file};
+use crate::generators::effective_fields;
+use crate::generators::naming::{pascal_to_snake, to_pascal_case, write_file};
+use crate::generators::render::render;
 use crate::generators::types::{
     is_enum_vo, is_option_vo, is_value_object, is_vec_vo, vo_inner_type,
 };
 use crate::patchers::api_rs::patch_api_rs;
 use crate::puerto_toml::Field;
-
-pub fn generate_crud_error_mapper(pascal: &str, snake: &str, fields: &[Field]) -> String {
-    let eff = effective_fields(fields);
-    let vo_fields: Vec<&Field> = eff.iter().filter(|f| is_value_object(f)).collect();
-
-    let vo_arms: String = vo_fields
-        .iter()
-        .map(|f| {
-            let vo = f.value_object.as_deref().unwrap();
-            format!(
-                "            {pascal}Error::Invalid{vo} => (StatusCode::BAD_REQUEST, self.to_string()),",
-                pascal = pascal,
-                vo = vo,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let vo_arms_block = if vo_arms.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}", vo_arms)
-    };
-
-    format!(
-        r#"use business::domain::{snake}::errors::{pascal}Error;
-use poem::http::StatusCode;
-use poem_openapi::payload::Json;
-
-use crate::api::error::{{ErrorResponse, IntoErrorResponse}};
-
-impl IntoErrorResponse for {pascal}Error {{
-    fn into_error_response(self) -> (StatusCode, Json<ErrorResponse>) {{
-        let (status, message) = match &self {{
-            {pascal}Error::ValidationError(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            {pascal}Error::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            {pascal}Error::Duplicate => (StatusCode::CONFLICT, self.to_string()),
-            {pascal}Error::RepositoryError => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            {pascal}Error::Unknown => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),{vo_arms_block}
-        }};
-
-        (
-            status,
-            Json(ErrorResponse {{
-                name: "{snake}_error".into(),
-                message,
-            }}),
-        )
-    }}
-}}
-"#,
-        pascal = pascal,
-        snake = snake,
-        vo_arms_block = vo_arms_block,
-    )
-}
-
-pub(crate) const DTO: &str = r#"use business::domain::{snake}::model::{Pascal};
-use poem_openapi::Object;
-use uuid::Uuid;
-
-#[derive(Debug, Object)]
-pub struct {Pascal}Dto {
-    pub id: Uuid,
-    pub name: String,
-}
-
-impl {Pascal}Dto {
-    pub fn from_domain(entity: &{Pascal}) -> Self {
-        Self {
-            id: entity.id,
-            name: entity.name.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Object)]
-pub struct Create{Pascal}Request {
-    pub name: String,
-}
-"#;
-
-pub(crate) const RESPONSES: &str = r#"use crate::api::{error::ErrorResponse, {snake}::dto::{Pascal}Dto};
-use poem::http::StatusCode;
-use poem_openapi::{ApiResponse, payload::Json};
-
-#[derive(ApiResponse)]
-pub enum Create{Pascal}Response {
-    #[oai(status = 201)]
-    Created(Json<{Pascal}Dto>),
-    #[oai(status = 400)]
-    BadRequest(Json<ErrorResponse>),
-    #[oai(status = 409)]
-    Conflict(Json<ErrorResponse>),
-    #[oai(status = 500)]
-    InternalError(Json<ErrorResponse>),
-}
-
-impl Create{Pascal}Response {
-    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
-        match status {
-            StatusCode::BAD_REQUEST => Self::BadRequest(error),
-            StatusCode::CONFLICT => Self::Conflict(error),
-            _ => Self::InternalError(error),
-        }
-    }
-}
-"#;
-
-const CRUD_RESPONSES: &str = r#"use crate::api::{error::ErrorResponse, {snake}::dto::{Pascal}Dto};
-use poem::http::StatusCode;
-use poem_openapi::{ApiResponse, payload::Json};
-
-#[derive(ApiResponse)]
-pub enum Create{Pascal}Response {
-    #[oai(status = 201)]
-    Created(Json<{Pascal}Dto>),
-    #[oai(status = 400)]
-    BadRequest(Json<ErrorResponse>),
-    #[oai(status = 409)]
-    Conflict(Json<ErrorResponse>),
-    #[oai(status = 500)]
-    InternalError(Json<ErrorResponse>),
-}
-
-impl Create{Pascal}Response {
-    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
-        match status {
-            StatusCode::BAD_REQUEST => Self::BadRequest(error),
-            StatusCode::CONFLICT => Self::Conflict(error),
-            _ => Self::InternalError(error),
-        }
-    }
-}
-
-#[derive(ApiResponse)]
-pub enum Get{Pascal}Response {
-    #[oai(status = 200)]
-    Ok(Json<{Pascal}Dto>),
-    #[oai(status = 404)]
-    NotFound(Json<ErrorResponse>),
-    #[oai(status = 500)]
-    InternalError(Json<ErrorResponse>),
-}
-
-impl Get{Pascal}Response {
-    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
-        match status {
-            StatusCode::NOT_FOUND => Self::NotFound(error),
-            _ => Self::InternalError(error),
-        }
-    }
-}
-
-#[derive(ApiResponse)]
-pub enum List{Pascal}Response {
-    #[oai(status = 200)]
-    Ok(Json<Vec<{Pascal}Dto>>),
-    #[oai(status = 500)]
-    InternalError(Json<ErrorResponse>),
-}
-
-impl List{Pascal}Response {
-    pub fn from_status(_status: StatusCode, error: Json<ErrorResponse>) -> Self {
-        Self::InternalError(error)
-    }
-}
-
-#[derive(ApiResponse)]
-pub enum Update{Pascal}Response {
-    #[oai(status = 200)]
-    Ok(Json<{Pascal}Dto>),
-    #[oai(status = 400)]
-    BadRequest(Json<ErrorResponse>),
-    #[oai(status = 404)]
-    NotFound(Json<ErrorResponse>),
-    #[oai(status = 409)]
-    Conflict(Json<ErrorResponse>),
-    #[oai(status = 500)]
-    InternalError(Json<ErrorResponse>),
-}
-
-impl Update{Pascal}Response {
-    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
-        match status {
-            StatusCode::BAD_REQUEST => Self::BadRequest(error),
-            StatusCode::NOT_FOUND => Self::NotFound(error),
-            StatusCode::CONFLICT => Self::Conflict(error),
-            _ => Self::InternalError(error),
-        }
-    }
-}
-
-#[derive(ApiResponse)]
-pub enum Delete{Pascal}Response {
-    #[oai(status = 204)]
-    NoContent,
-    #[oai(status = 404)]
-    NotFound(Json<ErrorResponse>),
-    #[oai(status = 500)]
-    InternalError(Json<ErrorResponse>),
-}
-
-impl Delete{Pascal}Response {
-    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
-        match status {
-            StatusCode::NOT_FOUND => Self::NotFound(error),
-            _ => Self::InternalError(error),
-        }
-    }
-}
-"#;
-
-pub(crate) const ERROR_MAPPER: &str = r#"use business::domain::{snake}::errors::{Pascal}Error;
-use poem::http::StatusCode;
-use poem_openapi::payload::Json;
-
-use crate::api::error::{ErrorResponse, IntoErrorResponse};
-
-impl IntoErrorResponse for {Pascal}Error {
-    fn into_error_response(self) -> (StatusCode, Json<ErrorResponse>) {
-        let (status, message) = match &self {
-            {Pascal}Error::ValidationError(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            {Pascal}Error::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            {Pascal}Error::Duplicate => (StatusCode::CONFLICT, self.to_string()),
-            {Pascal}Error::RepositoryError => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            {Pascal}Error::Unknown => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-        };
-
-        (
-            status,
-            Json(ErrorResponse {
-                name: "{snake}_error".into(),
-                message,
-            }),
-        )
-    }
-}
-"#;
-
-pub(crate) const ROUTES: &str = r#"use std::sync::Arc;
-
-use business::{
-    application::{snake}::create_{snake}::Create{Pascal}UseCaseImpl,
-    domain::{
-        {snake}::use_cases::create_{snake}::{Create{Pascal}Params, Create{Pascal}UseCaseTrait},
-        logger::LoggerTrait,
-    },
-};
-use poem_openapi::{OpenApi, payload::Json};
-
-use crate::api::error::IntoErrorResponse;
-use crate::api::{snake}::dto::{Create{Pascal}Request, {Pascal}Dto};
-use crate::api::{snake}::responses::Create{Pascal}Response;
-
-pub struct {Pascal}Api {
-    pub create_{snake}: Arc<Create{Pascal}UseCaseImpl>,
-    pub logger: Arc<dyn LoggerTrait>,
-}
-
-#[OpenApi]
-impl {Pascal}Api {
-    /// Create a new {Pascal}
-    #[oai(path = "/{snake}s", method = "post")]
-    async fn create(&self, body: Json<Create{Pascal}Request>) -> Create{Pascal}Response {
-        match self
-            .create_{snake}
-            .execute(Create{Pascal}Params { name: body.name.clone() })
-            .await
-        {
-            Ok(entity) => Create{Pascal}Response::Created(Json({Pascal}Dto::from_domain(&entity))),
-            Err(err) => {
-                let (status, error) = err.into_error_response();
-                self.logger.warn(&format!("create_{snake} error: {}", error.0.message));
-                Create{Pascal}Response::from_status(status, error)
-            }
-        }
-    }
-}
-"#;
-
-// ── Dynamic generators ────────────────────────────────────────────────────────
-
-fn effective_fields(fields: &[Field]) -> Vec<Field> {
-    if fields.is_empty() {
-        vec![Field {
-            name: "name".into(),
-            field_type: "String".into(),
-            unique: false,
-            value_object: None,
-            value_object_kind: None,
-            enum_variants: None,
-        }]
-    } else {
-        fields.to_vec()
-    }
-}
 
 fn field_needs_clone(field_type: &str) -> bool {
     matches!(
@@ -312,98 +17,114 @@ fn field_needs_clone(field_type: &str) -> bool {
     )
 }
 
-pub fn generate_crud_dto(pascal: &str, snake: &str, fields: &[Field]) -> String {
+fn build_dto_from_expr(f: &Field) -> String {
+    if is_enum_vo(f) {
+        format!("            {}: entity.{}.as_str().to_string(),", f.name, f.name)
+    } else if is_option_vo(f) {
+        let inner = vo_inner_type(f);
+        if inner == "String" {
+            format!(
+                "            {}: entity.{}.as_ref().map(|v| v.value().to_string()),",
+                f.name, f.name
+            )
+        } else {
+            format!("            {}: entity.{}.map(|v| v.value()),", f.name, f.name)
+        }
+    } else if is_vec_vo(f) {
+        let inner = vo_inner_type(f);
+        if inner == "String" {
+            format!(
+                "            {}: entity.{}.iter().map(|v| v.value().to_string()).collect::<Vec<_>>(),",
+                f.name, f.name
+            )
+        } else {
+            format!(
+                "            {}: entity.{}.iter().map(|v| v.value()).collect::<Vec<_>>(),",
+                f.name, f.name
+            )
+        }
+    } else if is_value_object(f) {
+        match f.field_type.as_str() {
+            "String" => format!("            {}: entity.{}.value().to_string(),", f.name, f.name),
+            _ => format!("            {}: entity.{}.value(),", f.name, f.name),
+        }
+    } else if field_needs_clone(&f.field_type) {
+        format!("            {}: entity.{}.clone(),", f.name, f.name)
+    } else {
+        format!("            {}: entity.{},", f.name, f.name)
+    }
+}
+
+pub(crate) fn build_dto_ctx(
+    pascal: &str,
+    snake: &str,
+    fields: &[Field],
+    is_crud: bool,
+) -> tera::Context {
     let eff = effective_fields(fields);
 
-    let dto_fields: String = eff
+    let dto_fields_str = eff
         .iter()
         .map(|f| format!("    pub {}: {},", f.name, f.field_type))
         .collect::<Vec<_>>()
         .join("\n");
 
-    let dto_from_fields: String = eff
+    let dto_from_str = eff
         .iter()
-        .map(|f| {
-            if is_enum_vo(f) {
-                format!("            {}: entity.{}.as_str().to_string(),", f.name, f.name)
-            } else if is_option_vo(f) {
-                let inner = vo_inner_type(f);
-                if inner == "String" {
-                    format!("            {}: entity.{}.as_ref().map(|v| v.value().to_string()),", f.name, f.name)
-                } else {
-                    format!("            {}: entity.{}.map(|v| v.value()),", f.name, f.name)
-                }
-            } else if is_vec_vo(f) {
-                let inner = vo_inner_type(f);
-                if inner == "String" {
-                    format!("            {}: entity.{}.iter().map(|v| v.value().to_string()).collect::<Vec<_>>(),", f.name, f.name)
-                } else {
-                    format!("            {}: entity.{}.iter().map(|v| v.value()).collect::<Vec<_>>(),", f.name, f.name)
-                }
-            } else if is_value_object(f) {
-                match f.field_type.as_str() {
-                    "String" => format!(
-                        "            {}: entity.{}.value().to_string(),",
-                        f.name, f.name
-                    ),
-                    _ => format!("            {}: entity.{}.value(),", f.name, f.name),
-                }
-            } else if field_needs_clone(&f.field_type) {
-                format!("            {}: entity.{}.clone(),", f.name, f.name)
-            } else {
-                format!("            {}: entity.{},", f.name, f.name)
-            }
-        })
+        .map(build_dto_from_expr)
         .collect::<Vec<_>>()
         .join("\n");
 
-    let request_fields: String = eff
+    let request_fields_str = eff
         .iter()
         .filter(|f| f.field_type != "Uuid")
         .map(|f| format!("    pub {}: {},", f.name, f.field_type))
         .collect::<Vec<_>>()
         .join("\n");
 
-    let template = r#"use business::domain::{snake}::model::{Pascal};
-use poem_openapi::Object;
-use uuid::Uuid;
-
-#[derive(Debug, Object)]
-pub struct {Pascal}Dto {
-    pub id: Uuid,
-{dto_fields}
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("is_crud", &is_crud);
+    ctx.insert("dto_fields_str", &dto_fields_str);
+    ctx.insert("dto_from_str", &dto_from_str);
+    ctx.insert("request_fields_str", &request_fields_str);
+    ctx
 }
 
-impl {Pascal}Dto {
-    pub fn from_domain(entity: &{Pascal}) -> Self {
-        Self {
-            id: entity.id,
-{dto_from_fields}
-        }
-    }
+pub(crate) fn build_error_mapper_ctx(pascal: &str, snake: &str, fields: &[Field]) -> tera::Context {
+    let eff = effective_fields(fields);
+    let vo_arms: Vec<String> = eff
+        .iter()
+        .filter(|f| is_value_object(f))
+        .map(|f| {
+            let vo = f.value_object.as_deref().unwrap();
+            format!(
+                "\n            {pascal}Error::Invalid{vo} => (StatusCode::BAD_REQUEST, self.to_string()),",
+            )
+        })
+        .collect();
+    let vo_arms_str = vo_arms.join("");
+
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("vo_arms_str", &vo_arms_str);
+    ctx
 }
 
-#[derive(Debug, Object)]
-pub struct Create{Pascal}Request {
-{request_fields}
+pub(crate) fn build_simple_ctx(pascal: &str, snake: &str) -> tera::Context {
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx
 }
 
-#[derive(Debug, Object)]
-pub struct Update{Pascal}Request {
-{request_fields}
-}
-"#;
+fn build_routes_crud_ctx(pascal: &str, snake: &str, fields: &[Field]) -> tera::Context {
+    let eff = effective_fields(fields);
 
-    template
-        .replace("{Pascal}", pascal)
-        .replace("{snake}", snake)
-        .replace("{dto_fields}", &dto_fields)
-        .replace("{dto_from_fields}", &dto_from_fields)
-        .replace("{request_fields}", &request_fields)
-}
-
-fn create_params_mapping(eff: &[Field]) -> String {
-    eff.iter()
+    let create_params_str = eff
+        .iter()
         .filter(|f| f.field_type != "Uuid")
         .map(|f| {
             if field_needs_clone(&f.field_type) {
@@ -413,165 +134,36 @@ fn create_params_mapping(eff: &[Field]) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("\n")
-}
+        .join("\n");
 
-fn update_params_mapping(eff: &[Field]) -> String {
-    let mut lines = vec!["                id: id.0,".to_string()];
+    let mut update_lines = vec!["                id: id.0,".to_string()];
     for f in eff.iter().filter(|f| f.field_type != "Uuid") {
         if field_needs_clone(&f.field_type) {
-            lines.push(format!(
-                "                {}: body.{}.clone(),",
-                f.name, f.name
-            ));
+            update_lines.push(format!("                {}: body.{}.clone(),", f.name, f.name));
         } else {
-            lines.push(format!("                {}: body.{},", f.name, f.name));
+            update_lines.push(format!("                {}: body.{},", f.name, f.name));
         }
     }
-    lines.join("\n")
+    let update_params_str = update_lines.join("\n");
+
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("create_params_str", &create_params_str);
+    ctx.insert("update_params_str", &update_params_str);
+    ctx
 }
 
+#[cfg(test)]
+pub fn generate_crud_dto(pascal: &str, snake: &str, fields: &[Field]) -> String {
+    render("presentation/dto.tera", &build_dto_ctx(pascal, snake, fields, true))
+        .expect("presentation/dto.tera render failed")
+}
+
+#[cfg(test)]
 pub fn generate_crud_routes(pascal: &str, snake: &str, fields: &[Field]) -> String {
-    let eff = effective_fields(fields);
-    let create_params = create_params_mapping(&eff);
-    let update_params = update_params_mapping(&eff);
-
-    let template = r#"use std::sync::Arc;
-
-use business::{
-    application::{snake}::{
-        create_{snake}::Create{Pascal}UseCaseImpl,
-        delete_{snake}::Delete{Pascal}UseCaseImpl,
-        get_{snake}::Get{Pascal}UseCaseImpl,
-        list_{snake}::List{Pascal}UseCaseImpl,
-        update_{snake}::Update{Pascal}UseCaseImpl,
-    },
-    domain::{
-        {snake}::use_cases::{
-            create_{snake}::{Create{Pascal}Params, Create{Pascal}UseCaseTrait},
-            delete_{snake}::{Delete{Pascal}Params, Delete{Pascal}UseCaseTrait},
-            get_{snake}::{Get{Pascal}Params, Get{Pascal}UseCaseTrait},
-            list_{snake}::{List{Pascal}Params, List{Pascal}UseCaseTrait},
-            update_{snake}::{Update{Pascal}Params, Update{Pascal}UseCaseTrait},
-        },
-        logger::LoggerTrait,
-    },
-};
-use poem_openapi::{OpenApi, param::Path, payload::Json};
-use uuid::Uuid;
-
-use crate::api::error::IntoErrorResponse;
-use crate::api::{snake}::dto::{Create{Pascal}Request, Update{Pascal}Request, {Pascal}Dto};
-use crate::api::{snake}::responses::{
-    Create{Pascal}Response, Delete{Pascal}Response, Get{Pascal}Response, List{Pascal}Response,
-    Update{Pascal}Response,
-};
-
-pub struct {Pascal}Api {
-    pub create_{snake}: Arc<Create{Pascal}UseCaseImpl>,
-    pub get_{snake}: Arc<Get{Pascal}UseCaseImpl>,
-    pub list_{snake}: Arc<List{Pascal}UseCaseImpl>,
-    pub update_{snake}: Arc<Update{Pascal}UseCaseImpl>,
-    pub delete_{snake}: Arc<Delete{Pascal}UseCaseImpl>,
-    pub logger: Arc<dyn LoggerTrait>,
-}
-
-#[OpenApi]
-impl {Pascal}Api {
-    /// Create a new {Pascal}
-    #[oai(path = "/{snake}s", method = "post")]
-    async fn create(&self, body: Json<Create{Pascal}Request>) -> Create{Pascal}Response {
-        match self
-            .create_{snake}
-            .execute(Create{Pascal}Params {
-{create_params}
-            })
-            .await
-        {
-            Ok(entity) => Create{Pascal}Response::Created(Json({Pascal}Dto::from_domain(&entity))),
-            Err(err) => {
-                let (status, error) = err.into_error_response();
-                self.logger.warn(&format!("create_{snake} error: {}", error.0.message));
-                Create{Pascal}Response::from_status(status, error)
-            }
-        }
-    }
-
-    /// Get a {Pascal} by ID
-    #[oai(path = "/{snake}s/:id", method = "get")]
-    async fn get_by_id(&self, id: Path<Uuid>) -> Get{Pascal}Response {
-        match self
-            .get_{snake}
-            .execute(Get{Pascal}Params { id: id.0 })
-            .await
-        {
-            Ok(entity) => Get{Pascal}Response::Ok(Json({Pascal}Dto::from_domain(&entity))),
-            Err(err) => {
-                let (status, error) = err.into_error_response();
-                self.logger.warn(&format!("get_{snake} error: {}", error.0.message));
-                Get{Pascal}Response::from_status(status, error)
-            }
-        }
-    }
-
-    /// List all {Pascal}s
-    #[oai(path = "/{snake}s", method = "get")]
-    async fn list(&self) -> List{Pascal}Response {
-        match self.list_{snake}.execute(List{Pascal}Params).await {
-            Ok(entities) => {
-                List{Pascal}Response::Ok(Json(entities.iter().map({Pascal}Dto::from_domain).collect()))
-            }
-            Err(err) => {
-                let (status, error) = err.into_error_response();
-                self.logger.error(&format!("list_{snake} error: {}", error.0.message));
-                List{Pascal}Response::from_status(status, error)
-            }
-        }
-    }
-
-    /// Update a {Pascal}
-    #[oai(path = "/{snake}s/:id", method = "put")]
-    async fn update(&self, id: Path<Uuid>, body: Json<Update{Pascal}Request>) -> Update{Pascal}Response {
-        match self
-            .update_{snake}
-            .execute(Update{Pascal}Params {
-{update_params}
-            })
-            .await
-        {
-            Ok(entity) => Update{Pascal}Response::Ok(Json({Pascal}Dto::from_domain(&entity))),
-            Err(err) => {
-                let (status, error) = err.into_error_response();
-                self.logger.warn(&format!("update_{snake} error: {}", error.0.message));
-                Update{Pascal}Response::from_status(status, error)
-            }
-        }
-    }
-
-    /// Delete a {Pascal}
-    #[oai(path = "/{snake}s/:id", method = "delete")]
-    async fn delete(&self, id: Path<Uuid>) -> Delete{Pascal}Response {
-        match self
-            .delete_{snake}
-            .execute(Delete{Pascal}Params { id: id.0 })
-            .await
-        {
-            Ok(()) => Delete{Pascal}Response::NoContent,
-            Err(err) => {
-                let (status, error) = err.into_error_response();
-                self.logger.warn(&format!("delete_{snake} error: {}", error.0.message));
-                Delete{Pascal}Response::from_status(status, error)
-            }
-        }
-    }
-}
-"#;
-
-    template
-        .replace("{Pascal}", pascal)
-        .replace("{snake}", snake)
-        .replace("{create_params}", &create_params)
-        .replace("{update_params}", &update_params)
+    render("presentation/routes_crud.tera", &build_routes_crud_ctx(pascal, snake, fields))
+        .expect("presentation/routes_crud.tera render failed")
 }
 
 pub fn write_presentation_files(
@@ -586,19 +178,29 @@ pub fn write_presentation_files(
     )?;
     write_file(
         &base.join(format!("presentation/src/api/{snake}/dto.rs")),
-        &generate_crud_dto(pascal, snake, fields),
+        &render("presentation/dto.tera", &build_dto_ctx(pascal, snake, fields, true))
+            .expect("presentation/dto.tera render failed"),
     )?;
     write_file(
         &base.join(format!("presentation/src/api/{snake}/responses.rs")),
-        &apply(CRUD_RESPONSES, pascal, snake),
+        &render("presentation/responses_crud.tera", &build_simple_ctx(pascal, snake))
+            .expect("presentation/responses_crud.tera render failed"),
     )?;
     write_file(
         &base.join(format!("presentation/src/api/{snake}/error_mapper.rs")),
-        &generate_crud_error_mapper(pascal, snake, fields),
+        &render(
+            "presentation/error_mapper.tera",
+            &build_error_mapper_ctx(pascal, snake, fields),
+        )
+        .expect("presentation/error_mapper.tera render failed"),
     )?;
     write_file(
         &base.join(format!("presentation/src/api/{snake}/routes.rs")),
-        &generate_crud_routes(pascal, snake, fields),
+        &render(
+            "presentation/routes_crud.tera",
+            &build_routes_crud_ctx(pascal, snake, fields),
+        )
+        .expect("presentation/routes_crud.tera render failed"),
     )?;
     Ok(())
 }

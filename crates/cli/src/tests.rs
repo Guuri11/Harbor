@@ -213,6 +213,7 @@ fn ddd_layers_exist() {
             .join("presentation/src/generated/bootstrap.rs")
             .exists()
     );
+    assert!(output.join("presentation/src/api/tags.rs").exists());
 
     cleanup(&dir);
 }

@@ -2,51 +2,19 @@ use std::path::Path;
 
 use crate::generators::types::{is_shared_vo, is_value_object};
 use crate::generators::{
-    application::{USE_CASE_IMPL, write_application_files},
-    domain::{
-        ERRORS, USE_CASE_TRAIT, generate_model, patch_mothers_lib, write_domain_files, write_mother,
-    },
-    infrastructure::{INFRA_DB_REPOSITORY, INFRA_ENTITY, INFRA_REPOSITORY, write_repository_files},
+    application::{generate_create_use_case_impl, write_application_files},
+    domain::{generate_create_use_case_trait, generate_model, patch_mothers_lib, write_domain_files, write_mother},
+    infrastructure::{generate_infra_entity, write_repository_files},
     migration::run_migration,
-    naming::{apply, pascal_to_snake, to_pascal_case, write_file},
-    presentation::{DTO, ERROR_MAPPER, RESPONSES, ROUTES, write_presentation_files},
+    naming::{pascal_to_snake, to_pascal_case, write_file},
+    presentation::write_presentation_files,
+    render::render,
 };
 use crate::patchers::lib_rs::{
     patch_business_lib_shared, patch_business_lib_value_objects, try_patch_libs,
 };
 use crate::puerto_toml::{Field, ValueObjectDefinition};
 
-// Non-CRUD repository trait (find_by_id + save only — no find_all).
-// Used by the single-use-case path (`puerto generate scaffold` legacy / tests).
-const REPOSITORY: &str = r#"use async_trait::async_trait;
-use uuid::Uuid;
-
-use super::{errors::{Pascal}Error, model::{Pascal}};
-
-#[async_trait]
-pub trait {Pascal}RepositoryTrait: Send + Sync {
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<{Pascal}>, {Pascal}Error>;
-    async fn save(&self, entity: &{Pascal}) -> Result<(), {Pascal}Error>;
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub mod mocks {
-    use mockall::mock;
-    use uuid::Uuid;
-
-    use super::*;
-
-    mock! {
-        pub {Pascal}Repository {}
-
-        #[async_trait]
-        impl {Pascal}RepositoryTrait for {Pascal}Repository {
-            async fn find_by_id(&self, id: Uuid) -> Result<Option<{Pascal}>, {Pascal}Error>;
-            async fn save(&self, entity: &{Pascal}) -> Result<(), {Pascal}Error>;
-        }
-    }
-}
-"#;
 
 // ── Single use case (non-CRUD) ────────────────────────────────────────────────
 
@@ -60,61 +28,86 @@ fn write_files(
         &base.join(format!("business/src/domain/{snake}/model.rs")),
         &generate_model(pascal, snake, &[], &[]),
     )?;
+    let mut errors_ctx = tera::Context::new();
+    errors_ctx.insert("pascal", pascal);
+    errors_ctx.insert("snake", snake);
+    errors_ctx.insert("vo_fields", &Vec::<String>::new());
     write_file(
         &base.join(format!("business/src/domain/{snake}/errors.rs")),
-        &apply(ERRORS, pascal, snake),
+        &render("domain/errors.tera", &errors_ctx)?,
     )?;
-    write_file(
-        &base.join(format!("business/src/domain/{snake}/repository.rs")),
-        &apply(REPOSITORY, pascal, snake),
-    )?;
+    {
+        let mut repo_ctx = tera::Context::new();
+        repo_ctx.insert("pascal", pascal);
+        repo_ctx.insert("snake", snake);
+        write_file(
+            &base.join(format!("business/src/domain/{snake}/repository.rs")),
+            &render("domain/repository_simple.tera", &repo_ctx)
+                .expect("domain/repository_simple.tera render failed"),
+        )?;
+    }
     write_file(
         &base.join(format!(
             "business/src/domain/{snake}/use_cases/create_{snake}.rs"
         )),
-        &apply(USE_CASE_TRAIT, pascal, snake),
+        &generate_create_use_case_trait(pascal, snake, &[]),
     )?;
     write_file(
         &base.join(format!(
             "business/src/application/{snake}/create_{snake}.rs"
         )),
-        &apply(USE_CASE_IMPL, pascal, snake),
+        &generate_create_use_case_impl(pascal, snake, &[], &[]),
     )?;
+    let infra_ctx = {
+        let mut c = tera::Context::new();
+        c.insert("pascal", pascal);
+        c.insert("snake", snake);
+        c
+    };
     if db {
         write_file(
             &base.join(format!("infrastructure/src/{snake}/entity.rs")),
-            &apply(INFRA_ENTITY, pascal, snake),
+            &generate_infra_entity(pascal, snake, &[], &[]),
         )?;
         write_file(
             &base.join(format!("infrastructure/src/{snake}/repository.rs")),
-            &apply(INFRA_DB_REPOSITORY, pascal, snake),
+            &render("infrastructure/repository_pg_simple.tera", &infra_ctx)
+                .expect("infrastructure/repository_pg_simple.tera render failed"),
         )?;
     } else {
         write_file(
             &base.join(format!("infrastructure/src/{snake}/repository.rs")),
-            &apply(INFRA_REPOSITORY, pascal, snake),
+            &render("infrastructure/repository_inmemory_simple.tera", &infra_ctx)
+                .expect("infrastructure/repository_inmemory_simple.tera render failed"),
         )?;
     }
     write_file(
         &base.join(format!("presentation/src/api/{snake}.rs")),
         "pub mod dto;\npub mod error_mapper;\npub mod responses;\npub mod routes;\n",
     )?;
-    write_file(
-        &base.join(format!("presentation/src/api/{snake}/dto.rs")),
-        &apply(DTO, pascal, snake),
-    )?;
-    write_file(
-        &base.join(format!("presentation/src/api/{snake}/responses.rs")),
-        &apply(RESPONSES, pascal, snake),
-    )?;
-    write_file(
-        &base.join(format!("presentation/src/api/{snake}/error_mapper.rs")),
-        &apply(ERROR_MAPPER, pascal, snake),
-    )?;
-    write_file(
-        &base.join(format!("presentation/src/api/{snake}/routes.rs")),
-        &apply(ROUTES, pascal, snake),
-    )?;
+    {
+        use crate::generators::presentation::{build_dto_ctx, build_error_mapper_ctx, build_simple_ctx};
+        write_file(
+            &base.join(format!("presentation/src/api/{snake}/dto.rs")),
+            &render("presentation/dto.tera", &build_dto_ctx(pascal, snake, &[], false))
+                .expect("presentation/dto.tera render failed"),
+        )?;
+        write_file(
+            &base.join(format!("presentation/src/api/{snake}/responses.rs")),
+            &render("presentation/responses_simple.tera", &build_simple_ctx(pascal, snake))
+                .expect("presentation/responses_simple.tera render failed"),
+        )?;
+        write_file(
+            &base.join(format!("presentation/src/api/{snake}/error_mapper.rs")),
+            &render("presentation/error_mapper.tera", &build_error_mapper_ctx(pascal, snake, &[]))
+                .expect("presentation/error_mapper.tera render failed"),
+        )?;
+        write_file(
+            &base.join(format!("presentation/src/api/{snake}/routes.rs")),
+            &render("presentation/routes_simple.tera", &build_simple_ctx(pascal, snake))
+                .expect("presentation/routes_simple.tera render failed"),
+        )?;
+    }
     Ok(())
 }
 

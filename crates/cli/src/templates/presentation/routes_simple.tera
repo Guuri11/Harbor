@@ -1,0 +1,40 @@
+use std::sync::Arc;
+
+use business::{
+    application::{{ snake }}::create_{{ snake }}::Create{{ pascal }}UseCaseImpl,
+    domain::{
+        {{ snake }}::use_cases::create_{{ snake }}::{Create{{ pascal }}Params, Create{{ pascal }}UseCaseTrait},
+        logger::LoggerTrait,
+    },
+};
+use poem_openapi::{OpenApi, payload::Json};
+
+use crate::api::error::IntoErrorResponse;
+use crate::api::tags::ApiTags;
+use crate::api::{{ snake }}::dto::{Create{{ pascal }}Request, {{ pascal }}Dto};
+use crate::api::{{ snake }}::responses::Create{{ pascal }}Response;
+
+pub struct {{ pascal }}Api {
+    pub create_{{ snake }}: Arc<Create{{ pascal }}UseCaseImpl>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[OpenApi]
+impl {{ pascal }}Api {
+    /// Create a new {{ pascal }}
+    #[oai(path = "/{{ snake }}s", method = "post", tag = "ApiTags::{{ pascal }}")]
+    async fn create(&self, body: Json<Create{{ pascal }}Request>) -> Create{{ pascal }}Response {
+        match self
+            .create_{{ snake }}
+            .execute(Create{{ pascal }}Params { name: body.name.clone() })
+            .await
+        {
+            Ok(entity) => Create{{ pascal }}Response::Created(Json({{ pascal }}Dto::from_domain(&entity))),
+            Err(err) => {
+                let (status, error) = err.into_error_response();
+                self.logger.warn(&format!("create_{{ snake }} error: {}", error.0.message));
+                Create{{ pascal }}Response::from_status(status, error)
+            }
+        }
+    }
+}

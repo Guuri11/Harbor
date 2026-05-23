@@ -1,0 +1,17 @@
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum {{ pascal }}Error {
+    #[error("{{ snake }}.validation_error.{0}")]
+    ValidationError(String),
+    #[error("{{ snake }}.not_found")]
+    NotFound,
+    #[error("{{ snake }}.duplicate")]
+    Duplicate,
+    #[error("{{ snake }}.repository_error")]
+    RepositoryError,
+    #[error("{{ snake }}.unknown")]
+    Unknown,
+{% for f in vo_fields %}    #[error("{{ snake }}.invalid_{{ f.vo_snake }}")]
+    Invalid{{ f.vo_pascal }},
+{% endfor %}}

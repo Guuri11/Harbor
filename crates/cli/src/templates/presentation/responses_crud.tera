@@ -1,0 +1,134 @@
+use crate::api::{error::ErrorResponse, {{ snake }}::dto::{{ pascal }}Dto};
+use poem::http::StatusCode;
+use poem_openapi::{ApiResponse, payload::Json};
+
+#[derive(ApiResponse)]
+pub enum Create{{ pascal }}Response {
+    #[oai(status = 201)]
+    Created(Json<{{ pascal }}Dto>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorResponse>),
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorResponse>),
+    #[oai(status = 403)]
+    Forbidden(Json<ErrorResponse>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorResponse>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorResponse>),
+}
+
+impl Create{{ pascal }}Response {
+    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
+        match status {
+            StatusCode::BAD_REQUEST => Self::BadRequest(error),
+            StatusCode::UNAUTHORIZED => Self::Unauthorized(error),
+            StatusCode::FORBIDDEN => Self::Forbidden(error),
+            StatusCode::CONFLICT => Self::Conflict(error),
+            _ => Self::InternalError(error),
+        }
+    }
+}
+
+#[derive(ApiResponse)]
+pub enum Get{{ pascal }}Response {
+    #[oai(status = 200)]
+    Ok(Json<{{ pascal }}Dto>),
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorResponse>),
+    #[oai(status = 403)]
+    Forbidden(Json<ErrorResponse>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorResponse>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorResponse>),
+}
+
+impl Get{{ pascal }}Response {
+    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
+        match status {
+            StatusCode::UNAUTHORIZED => Self::Unauthorized(error),
+            StatusCode::FORBIDDEN => Self::Forbidden(error),
+            StatusCode::NOT_FOUND => Self::NotFound(error),
+            _ => Self::InternalError(error),
+        }
+    }
+}
+
+#[derive(ApiResponse)]
+pub enum List{{ pascal }}Response {
+    #[oai(status = 200)]
+    Ok(Json<Vec<{{ pascal }}Dto>>),
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorResponse>),
+    #[oai(status = 403)]
+    Forbidden(Json<ErrorResponse>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorResponse>),
+}
+
+impl List{{ pascal }}Response {
+    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
+        match status {
+            StatusCode::UNAUTHORIZED => Self::Unauthorized(error),
+            StatusCode::FORBIDDEN => Self::Forbidden(error),
+            _ => Self::InternalError(error),
+        }
+    }
+}
+
+#[derive(ApiResponse)]
+pub enum Update{{ pascal }}Response {
+    #[oai(status = 200)]
+    Ok(Json<{{ pascal }}Dto>),
+    #[oai(status = 400)]
+    BadRequest(Json<ErrorResponse>),
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorResponse>),
+    #[oai(status = 403)]
+    Forbidden(Json<ErrorResponse>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorResponse>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorResponse>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorResponse>),
+}
+
+impl Update{{ pascal }}Response {
+    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
+        match status {
+            StatusCode::BAD_REQUEST => Self::BadRequest(error),
+            StatusCode::UNAUTHORIZED => Self::Unauthorized(error),
+            StatusCode::FORBIDDEN => Self::Forbidden(error),
+            StatusCode::NOT_FOUND => Self::NotFound(error),
+            StatusCode::CONFLICT => Self::Conflict(error),
+            _ => Self::InternalError(error),
+        }
+    }
+}
+
+#[derive(ApiResponse)]
+pub enum Delete{{ pascal }}Response {
+    #[oai(status = 204)]
+    NoContent,
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorResponse>),
+    #[oai(status = 403)]
+    Forbidden(Json<ErrorResponse>),
+    #[oai(status = 404)]
+    NotFound(Json<ErrorResponse>),
+    #[oai(status = 500)]
+    InternalError(Json<ErrorResponse>),
+}
+
+impl Delete{{ pascal }}Response {
+    pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
+        match status {
+            StatusCode::UNAUTHORIZED => Self::Unauthorized(error),
+            StatusCode::FORBIDDEN => Self::Forbidden(error),
+            StatusCode::NOT_FOUND => Self::NotFound(error),
+            _ => Self::InternalError(error),
+        }
+    }
+}

@@ -1,0 +1,138 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use business::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    model::{{ pascal }},
+    repository::{{ pascal }}RepositoryTrait,
+};
+use business::domain::logger::LoggerTrait;
+
+use super::entity::{{ pascal }}Db;
+
+pub struct Pg{{ pascal }}Repository {
+    pub pool: PgPool,
+    logger: Arc<dyn LoggerTrait>,
+}
+
+impl Pg{{ pascal }}Repository {
+    pub fn new(pool: PgPool, logger: Arc<dyn LoggerTrait>) -> Self {
+        Self { pool, logger }
+    }
+}
+
+#[async_trait]
+impl {{ pascal }}RepositoryTrait for Pg{{ pascal }}Repository {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<{{ pascal }}>, {{ pascal }}Error> {
+        self.logger.debug(&format!("find_by_id: {id}"));
+        let row = sqlx::query_as!(
+            {{ pascal }}Db,
+            "SELECT id, created_at, updated_at, deleted, deleted_at, name
+             FROM {{ snake }}s WHERE id = $1 AND deleted = false",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            self.logger.error(&format!("find_by_id error: {e}"));
+            {{ pascal }}Error::RepositoryError
+        })?;
+
+        row.map(|r| r.try_into()).transpose()
+    }
+
+    async fn save(&self, entity: &{{ pascal }}) -> Result<(), {{ pascal }}Error> {
+        self.logger.debug(&format!("save: {}", entity.id));
+        let db = {{ pascal }}Db::from(entity);
+        sqlx::query!(
+            "INSERT INTO {{ snake }}s (id, created_at, updated_at, deleted, deleted_at, name)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE
+             SET updated_at = $3, deleted = $4, deleted_at = $5, name = $6",
+            db.id,
+            db.created_at,
+            db.updated_at,
+            db.deleted,
+            db.deleted_at,
+            db.name
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if let Some(db_err) = e.as_database_error() {
+                if db_err.code().map_or(false, |c| c == "23505") {
+                    return {{ pascal }}Error::Duplicate;
+                }
+            }
+            self.logger.error(&format!("save error: {e}"));
+            {{ pascal }}Error::RepositoryError
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use business::domain::{{ snake }}::model::{{ pascal }}Props;
+    use std::sync::Arc;
+
+    struct TestLogger;
+    impl business::domain::logger::LoggerTrait for TestLogger {
+        fn info(&self, _: &str) {}
+        fn warn(&self, _: &str) {}
+        fn error(&self, _: &str) {}
+        fn debug(&self, _: &str) {}
+    }
+
+    fn test_repo(pool: PgPool) -> Pg{{ pascal }}Repository {
+        Pg{{ pascal }}Repository::new(pool, Arc::new(TestLogger))
+    }
+
+    async fn seed(pool: &PgPool, name: &str) -> {{ pascal }} {
+        let entity = {{ pascal }}::new({{ pascal }}Props { name: name.to_string() }).unwrap();
+        test_repo(pool.clone()).save(&entity).await.unwrap();
+        entity
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_persist_and_retrieve_by_id(pool: PgPool) {
+        // Arrange
+        let entity = seed(&pool, "example").await;
+
+        // Act
+        let found = test_repo(pool).find_by_id(entity.id).await.unwrap().unwrap();
+
+        // Assert
+        assert_eq!(found.id, entity.id);
+        assert_eq!(found.name, entity.name);
+        assert!(!found.deleted);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_return_none_for_nonexistent_id(pool: PgPool) {
+        // Act
+        let result = test_repo(pool).find_by_id(Uuid::new_v4()).await.unwrap();
+
+        // Assert
+        assert!(result.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_update_entity_on_save_conflict(pool: PgPool) {
+        // Arrange
+        let mut entity = seed(&pool, "original").await;
+        entity.name = "updated".to_string();
+        entity.updated_at = chrono::Utc::now();
+
+        // Act
+        test_repo(pool.clone()).save(&entity).await.unwrap();
+
+        // Assert
+        let found = test_repo(pool).find_by_id(entity.id).await.unwrap().unwrap();
+        assert_eq!(found.name, "updated");
+    }
+}

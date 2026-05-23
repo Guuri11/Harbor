@@ -1,0 +1,145 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+{% for imp in extra_imports %}{{ imp }}
+{% endfor %}
+use crate::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    model::{{ pascal }},
+    repository::{{ pascal }}RepositoryTrait,
+    use_cases::update_{{ snake }}::{Update{{ pascal }}Params, Update{{ pascal }}UseCaseTrait},
+};
+use crate::domain::logger::LoggerTrait;
+
+pub struct Update{{ pascal }}UseCaseImpl {
+    pub repository: Arc<dyn {{ pascal }}RepositoryTrait>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[async_trait]
+impl Update{{ pascal }}UseCaseTrait for Update{{ pascal }}UseCaseImpl {
+    async fn execute(&self, params: Update{{ pascal }}Params) -> Result<{{ pascal }}, {{ pascal }}Error> {
+        self.logger.info(&format!("Updating {{ snake }}: {}", params.id));
+        let mut entity = self
+            .repository
+            .find_by_id(params.id)
+            .await
+            .map_err(|e| {
+                self.logger.error(&e.to_string());
+                e
+            })?
+            .ok_or_else(|| {
+                let err = {{ pascal }}Error::NotFound;
+                self.logger.warn(&err.to_string());
+                err
+            })?;
+{% if validations %}{{ validations }}{% endif %}{% if vo_constructions %}{{ vo_constructions }}{% endif %}{{ assignments }}
+        entity.updated_at = chrono::Utc::now();
+        self.repository.save(&entity).await.map_err(|e| {
+            self.logger.error(&e.to_string());
+            e
+        })?;
+        Ok(entity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{{ snake }}::{
+        model::{{ "{" }}{{ pascal }}, {{ pascal }}Props},
+        repository::mocks::Mock{{ pascal }}Repository,
+    };
+    use crate::domain::logger::mocks::MockLogger;
+    use uuid::Uuid;
+{{ test_vo_imports }}
+    fn silent_logger() -> MockLogger {
+        let mut mock = MockLogger::new();
+        mock.expect_info().returning(|_| ());
+        mock.expect_warn().returning(|_| ());
+        mock.expect_error().returning(|_| ());
+        mock.expect_debug().returning(|_| ());
+        mock
+    }
+
+    #[tokio::test]
+    async fn should_update_{{ snake }}_when_params_are_valid() {
+        // Arrange
+        let entity = {{ pascal }}::new({{ pascal }}Props {
+{{ original_props }}
+        }).unwrap();
+        let entity_id = entity.id;
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo
+            .expect_find_by_id()
+            .returning(move |_| Ok(Some(entity.clone())));
+        mock_repo.expect_save().returning(|_| Ok(()));
+        let use_case = Update{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        // Act
+        let result = use_case
+            .execute(Update{{ pascal }}Params {
+{{ update_params }}
+            })
+            .await;
+
+        // Assert
+        {{ valid_assertion }}
+    }
+
+    #[tokio::test]
+    async fn should_return_not_found_when_{{ snake }}_does_not_exist() {
+        // Arrange
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo.expect_find_by_id().returning(|_| Ok(None));
+        let use_case = Update{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        // Act
+        let result = use_case
+            .execute(Update{{ pascal }}Params {
+{{ not_found_params }}
+            })
+            .await;
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "{{ snake }}.not_found");
+    }
+{% for tc in validation_test_cases %}
+    #[tokio::test]
+    async fn {{ tc.test_name }}() {
+        // Arrange
+        let entity = {{ pascal }}::new({{ pascal }}Props {
+{{ original_props }}
+        }).unwrap();
+        let entity_id = entity.id;
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo
+            .expect_find_by_id()
+            .returning(move |_| Ok(Some(entity.clone())));
+        let use_case = Update{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        // Act
+        let result = use_case
+            .execute(Update{{ pascal }}Params {
+{{ tc.empty_params }}
+            })
+            .await;
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "{{ tc.error_str }}"
+        );
+    }
+{% endfor %}}

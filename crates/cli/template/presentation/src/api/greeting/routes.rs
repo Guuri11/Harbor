@@ -9,7 +9,7 @@ use business::{
 };
 use poem_openapi::{OpenApi, param::Path};
 
-use crate::api::{error::IntoErrorResponse, greeting::{dto::GreetingDto, responses::GetGreetingResponse}};
+use crate::api::{error::IntoErrorResponse, greeting::{dto::GreetingDto, responses::GetGreetingResponse}, tags::ApiTags};
 
 pub struct GreetingApi {
     pub get_greeting: Arc<GetGreetingUseCaseImpl>,
@@ -19,7 +19,7 @@ pub struct GreetingApi {
 #[OpenApi]
 impl GreetingApi {
     /// Get a greeting for the given name
-    #[oai(path = "/greetings/:name", method = "get")]
+    #[oai(path = "/greetings/:name", method = "get", tag = "ApiTags::Greeting")]
     async fn get_greeting(&self, name: Path<String>) -> GetGreetingResponse {
         match self.get_greeting.execute(GetGreetingParams { name: name.0 }).await {
             Ok(greeting) => GetGreetingResponse::Ok(poem_openapi::payload::Json(

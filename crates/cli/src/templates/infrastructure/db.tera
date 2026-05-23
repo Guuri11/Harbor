@@ -1,0 +1,27 @@
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use std::time::Duration;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum DatabaseError {
+    #[error("database.connection_error")]
+    ConnectionError,
+    #[error("database.migration_error")]
+    MigrationError,
+}
+
+pub async fn create_postgres_pool(database_url: &str) -> Result<PgPool, DatabaseError> {
+    PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect(database_url)
+        .await
+        .map_err(|_| DatabaseError::ConnectionError)
+}
+
+pub async fn run_migrations(pool: &PgPool) -> Result<(), DatabaseError> {
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|_| DatabaseError::MigrationError)
+}

@@ -1,0 +1,16 @@
+use async_trait::async_trait;
+use uuid::Uuid;
+{% for imp in extra_imports %}{{ imp }}
+{% endfor %}
+use crate::domain::{{ snake }}::{errors::{{ pascal }}Error, model::{{ pascal }}};
+
+#[derive(Debug, Clone)]
+pub struct Update{{ pascal }}Params {
+    pub id: Uuid,
+{% for f in params_fields %}    pub {{ f.name }}: {{ f.field_type }},
+{% endfor %}}
+
+#[async_trait]
+pub trait Update{{ pascal }}UseCaseTrait: Send + Sync {
+    async fn execute(&self, params: Update{{ pascal }}Params) -> Result<{{ pascal }}, {{ pascal }}Error>;
+}

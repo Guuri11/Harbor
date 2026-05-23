@@ -1,0 +1,35 @@
+use crate::domain::{{ snake }}::model::{{ pascal }};
+use crate::domain::{{ snake }}::model::{{ pascal }}Props;{{ imports }}
+
+pub struct {{ pascal }}Mother {
+{{ fields_str }}
+}
+
+impl {{ pascal }}Mother {
+    pub fn new() -> Self {
+        Self { {{ defaults }} }
+    }
+
+{{ with_methods_str }}{{ empty_methods_str }}
+
+    pub fn build(self) -> {{ pascal }} {
+        {{ pascal }}::new({{ pascal }}Props {
+{{ build_assignments_str }}
+        })
+        .expect("{{ pascal }}Mother: failed to build valid {{ pascal }}")
+    }
+
+    pub fn build_props(self) -> {{ pascal }}Props {
+        {{ pascal }}Props {
+{{ props_assignments_str }}
+        }
+    }
+
+    pub fn random() -> {{ pascal }} {
+        Self::new().build()
+    }
+
+    pub fn random_vec(n: usize) -> Vec<{{ pascal }}> {
+        (0..n).map(|_| Self::random()).collect()
+    }
+}

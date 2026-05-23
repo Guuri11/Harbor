@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
-use crate::generators::infrastructure::DB_RS;
 use crate::generators::naming::write_file;
+use crate::generators::render::render;
 
 const DB_MAKEFILE_TARGETS: &str = r#"
 .PHONY: db-up db-down docker-compose/up docker-compose/down reset-db \
@@ -197,7 +197,11 @@ pub fn apply_db_to_new_project(base: &Path) -> Result<(), Box<dyn std::error::Er
     fs::create_dir_all(base.join("infrastructure/migrations"))?;
 
     // infrastructure/src/db.rs
-    write_file(&base.join("infrastructure/src/db.rs"), DB_RS)?;
+    write_file(
+        &base.join("infrastructure/src/db.rs"),
+        &render("infrastructure/db.tera", &tera::Context::new())
+            .expect("infrastructure/db.tera render failed"),
+    )?;
 
     // Patch infrastructure/Cargo.toml to add sqlx
     patch_infra_cargo_toml(base)?;

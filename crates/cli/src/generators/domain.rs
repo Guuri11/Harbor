@@ -1,6 +1,9 @@
 use std::{fs, path::Path};
 
-use crate::generators::naming::{apply, pascal_to_snake, to_pascal_case, write_file};
+use serde_json::json;
+
+use crate::generators::naming::{pascal_to_snake, to_pascal_case, write_file};
+use crate::generators::render::render;
 use crate::generators::types::{
     field_rust_type, is_enum_vo, is_option_vo, is_shared_vo, is_value_object, is_vec_vo,
     resolve_type, vo_import_path, vo_inner_type,
@@ -11,20 +14,7 @@ use crate::patchers::lib_rs::{
 };
 use crate::puerto_toml::{Field, ValueObjectDefinition};
 
-fn effective_fields(fields: &[Field]) -> Vec<Field> {
-    if fields.is_empty() {
-        vec![Field {
-            name: "name".into(),
-            field_type: "String".into(),
-            unique: false,
-            value_object: None,
-            value_object_kind: None,
-            enum_variants: None,
-        }]
-    } else {
-        fields.to_vec()
-    }
-}
+use crate::generators::effective_fields;
 
 pub fn generate_model(
     pascal: &str,
@@ -45,7 +35,6 @@ pub fn generate_model(
             }
         }
     }
-
     let vo_fields: Vec<&Field> = eff.iter().filter(|f| is_value_object(f)).collect();
     for f in &vo_fields {
         let stmt = if is_shared_vo(f, shared_vos) {
@@ -63,14 +52,17 @@ pub fn generate_model(
             extra_imports.push(stmt);
         }
     }
+    let extra_imports_str = if extra_imports.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", extra_imports.join("\n"))
+    };
 
-    let props_lines: Vec<String> = eff
+    let props_str = eff
         .iter()
-        .map(|f| {
-            let rust_type = field_rust_type(f);
-            format!("    pub {}: {},", f.name, rust_type)
-        })
-        .collect();
+        .map(|f| format!("    pub {}: {},", f.name, field_rust_type(f)))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let mut entity_lines = vec![
         "    pub id: Uuid,".to_string(),
@@ -80,11 +72,10 @@ pub fn generate_model(
         "    pub deleted_at: Option<DateTime<Utc>>,".to_string(),
     ];
     for f in &eff {
-        let rust_type = field_rust_type(f);
-        entity_lines.push(format!("    pub {}: {},", f.name, rust_type));
+        entity_lines.push(format!("    pub {}: {},", f.name, field_rust_type(f)));
     }
+    let entity_str = entity_lines.join("\n");
 
-    // Only validate primitive String fields (not VO fields — those are validated in VO::new())
     let validations: Vec<String> = eff
         .iter()
         .filter(|f| f.field_type == "String" && !is_value_object(f))
@@ -95,11 +86,17 @@ pub fn generate_model(
             )
         })
         .collect();
+    let validations_str = if validations.is_empty() {
+        String::new()
+    } else {
+        validations.join("\n") + "\n"
+    };
 
-    let new_assignments: Vec<String> = eff
+    let new_assignments_str = eff
         .iter()
         .map(|f| format!("            {}: props.{},", f.name, f.name))
-        .collect();
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let valid_props_lines: Vec<String> = eff
         .iter()
@@ -125,6 +122,7 @@ pub fn generate_model(
             }
         })
         .collect();
+    let valid_props_str = valid_props_lines.join("\n");
 
     let required_string_fields: Vec<&Field> = eff
         .iter()
@@ -136,19 +134,16 @@ pub fn generate_model(
         && eff[0].field_type == "String"
         && !is_value_object(&eff[0])
     {
-        format!("should_create_{}_when_name_is_valid", snake)
+        format!("should_create_{snake}_when_name_is_valid")
     } else {
-        format!("should_create_{}_when_fields_are_valid", snake)
+        format!("should_create_{snake}_when_fields_are_valid")
     };
 
     let valid_assertion = if let Some(f) = eff
         .iter()
         .find(|f| f.field_type == "String" && !is_value_object(f))
     {
-        format!(
-            "\n        assert_eq!(result.unwrap().{}, \"example\");",
-            f.name
-        )
+        format!("\n        assert_eq!(result.unwrap().{}, \"example\");", f.name)
     } else if !eff.is_empty() {
         "\n        assert!(result.is_ok());".to_string()
     } else {
@@ -158,7 +153,6 @@ pub fn generate_model(
     let mut validation_tests: Vec<String> = vec![];
     for sf in &required_string_fields {
         let field_name = sf.name.clone();
-
         let empty_props: Vec<String> = eff
             .iter()
             .map(|f| {
@@ -181,21 +175,8 @@ pub fn generate_model(
                 }
             })
             .collect();
-
         validation_tests.push(format!(
-            "    #[test]
-    fn should_reject_{snake}_when_{field}_is_empty() {{
-        let result = {pascal}::new({pascal}Props {{
-{props}
-        }});
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            \"{snake}.validation_error.{field}_empty\"
-        );
-    }}",
-            snake = snake,
-            pascal = pascal,
+            "    #[test]\n    fn should_reject_{snake}_when_{field}_is_empty() {{\n        let result = {pascal}::new({pascal}Props {{\n{props}\n        }});\n        assert!(result.is_err());\n        assert_eq!(\n            result.unwrap_err().to_string(),\n            \"{snake}.validation_error.{field}_empty\"\n        );\n    }}",
             field = field_name,
             props = empty_props.join("\n"),
         ));
@@ -222,152 +203,58 @@ pub fn generate_model(
                 }
             })
             .collect();
-
         validation_tests.push(format!(
-            "    #[test]
-    fn should_reject_{snake}_when_{field}_is_only_whitespace() {{
-        let result = {pascal}::new({pascal}Props {{
-{props}
-        }});
-        assert!(result.is_err());
-    }}",
-            snake = snake,
-            pascal = pascal,
+            "    #[test]\n    fn should_reject_{snake}_when_{field}_is_only_whitespace() {{\n        let result = {pascal}::new({pascal}Props {{\n{props}\n        }});\n        assert!(result.is_err());\n    }}",
             field = field_name,
             props = ws_props.join("\n"),
         ));
     }
 
-    let vo_string_fields: Vec<&Field> = eff
-        .iter()
-        .filter(|f| is_value_object(f) && f.field_type == "String" && !is_enum_vo(f))
-        .collect();
-
-    for vf in &vo_string_fields {
+    for vf in eff.iter().filter(|f| is_value_object(f) && f.field_type == "String" && !is_enum_vo(f)) {
         let vo = vf.value_object.as_deref().unwrap();
         let snake_vo = pascal_to_snake(vo);
         let error_str = if is_shared_vo(vf, shared_vos) {
-            format!("shared.value_object.{}.invalid", snake_vo)
+            format!("shared.value_object.{snake_vo}.invalid")
         } else {
-            format!("{}.invalid_{}", snake, snake_vo)
+            format!("{snake}.invalid_{snake_vo}")
         };
-
         validation_tests.push(format!(
-            "    #[test]
-    fn should_reject_{snake}_when_{snake_vo}_is_empty() {{
-        let result = {vo}::new(\"\".to_string());
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            \"{error_str}\"
-        );
-    }}"
+            "    #[test]\n    fn should_reject_{snake}_when_{snake_vo}_is_empty() {{\n        let result = {vo}::new(\"\".to_string());\n        assert!(result.is_err());\n        assert_eq!(\n            result.unwrap_err().to_string(),\n            \"{error_str}\"\n        );\n    }}"
         ));
     }
 
-    let enum_vo_fields: Vec<&Field> = eff.iter().filter(|f| is_enum_vo(f)).collect();
-
-    for vf in &enum_vo_fields {
+    for vf in eff.iter().filter(|f| is_enum_vo(f)) {
         let vo = vf.value_object.as_deref().unwrap();
         let snake_vo = pascal_to_snake(vo);
         let error_str = if is_shared_vo(vf, shared_vos) {
-            format!("shared.value_object.{}.invalid", snake_vo)
+            format!("shared.value_object.{snake_vo}.invalid")
         } else {
-            format!("{}.invalid_{}", snake, snake_vo)
+            format!("{snake}.invalid_{snake_vo}")
         };
-
         validation_tests.push(format!(
-            "    #[test]
-    fn should_reject_{snake}_when_{snake_vo}_is_invalid() {{
-        let result = {vo}::from_str(\"InvalidVariant\");
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            \"{error_str}\"
-        );
-    }}"
+            "    #[test]\n    fn should_reject_{snake}_when_{snake_vo}_is_invalid() {{\n        let result = {vo}::from_str(\"InvalidVariant\");\n        assert!(result.is_err());\n        assert_eq!(\n            result.unwrap_err().to_string(),\n            \"{error_str}\"\n        );\n    }}"
         ));
     }
 
-    let extra_imports_str = if extra_imports.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}", extra_imports.join("\n"))
-    };
-
-    let props_str = props_lines.join("\n");
-    let entity_str = entity_lines.join("\n");
-    let validations_str = if validations.is_empty() {
-        String::new()
-    } else {
-        validations.join("\n") + "\n"
-    };
-    let new_assignments_str = new_assignments.join("\n");
-    let valid_props_str = valid_props_lines.join("\n");
     let validation_tests_str = if validation_tests.is_empty() {
         String::new()
     } else {
         format!("\n\n{}", validation_tests.join("\n\n"))
     };
 
-    format!(
-        "use chrono::{{DateTime, Utc}};
-use uuid::Uuid;{extra_imports}
-
-use super::errors::{pascal}Error;
-
-#[derive(Debug, Clone)]
-pub struct {pascal}Props {{
-{props}
-}}
-
-#[derive(Debug, Clone)]
-pub struct {pascal} {{
-{entity}
-}}
-
-impl {pascal} {{
-    pub fn new(props: {pascal}Props) -> Result<Self, {pascal}Error> {{
-{validations}        let now = chrono::Utc::now();
-        Ok(Self {{
-            id: Uuid::new_v4(),
-            created_at: now,
-            updated_at: now,
-            deleted: false,
-            deleted_at: None,
-{new_assignments}
-        }})
-    }}
-
-    pub fn from_repository(data: {pascal}) -> Self {{
-        data
-    }}
-}}
-
-#[cfg(test)]
-mod tests {{
-    use super::*;
-
-    #[test]
-    fn {valid_test_name}() {{
-        let result = {pascal}::new({pascal}Props {{
-{valid_props}
-        }});{assertion}
-    }}
-{validation_tests}
-}}
-",
-        extra_imports = extra_imports_str,
-        pascal = pascal,
-        props = props_str,
-        entity = entity_str,
-        validations = validations_str,
-        new_assignments = new_assignments_str,
-        valid_test_name = valid_test_name,
-        valid_props = valid_props_str,
-        assertion = valid_assertion,
-        validation_tests = validation_tests_str,
-    )
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("extra_imports", &extra_imports_str);
+    ctx.insert("props_str", &props_str);
+    ctx.insert("entity_str", &entity_str);
+    ctx.insert("validations_str", &validations_str);
+    ctx.insert("new_assignments_str", &new_assignments_str);
+    ctx.insert("valid_test_name", &valid_test_name);
+    ctx.insert("valid_props_str", &valid_props_str);
+    ctx.insert("valid_assertion", &valid_assertion);
+    ctx.insert("validation_tests_str", &validation_tests_str);
+    render("domain/model.tera", &ctx).expect("model.tera render failed")
 }
 
 pub fn generate_mother(
@@ -389,23 +276,25 @@ pub fn generate_mother(
             }
         }
     }
-
-    // Add VO imports if any
-    let vo_fields: Vec<&Field> = eff.iter().filter(|f| is_value_object(f)).collect();
-    for vf in &vo_fields {
+    for vf in eff.iter().filter(|f| is_value_object(f)) {
         let import_path = vo_import_path(vf, snake, shared_vos);
         let stmt = format!("use {};", import_path);
         if !mother_imports.contains(&stmt) {
             mother_imports.push(stmt);
         }
     }
+    let imports_str = if mother_imports.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", mother_imports.join("\n"))
+    };
 
     let required_string_fields: Vec<&Field> = eff
         .iter()
         .filter(|f| f.field_type == "String" && !is_value_object(f))
         .collect();
 
-    let mother_fields: Vec<String> = eff
+    let fields_str = eff
         .iter()
         .map(|f| {
             if is_vec_vo(f) {
@@ -415,52 +304,52 @@ pub fn generate_mother(
                 let vo = f.value_object.as_deref().unwrap();
                 format!("    {}: Option<{}>,", f.name, vo)
             } else {
-                let storage_type = mother_storage_type(&f.field_type);
-                format!("    {}: Option<{}>,", f.name, storage_type)
+                format!("    {}: Option<{}>,", f.name, mother_storage_type(&f.field_type))
             }
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let with_methods: Vec<String> = eff
+    let with_methods_str = eff
         .iter()
         .map(|f| {
             if is_vec_vo(f) {
                 let vo = f.value_object.as_deref().unwrap();
                 format!(
                     "    pub fn with_{field}(mut self, {field}: Vec<{vo}>) -> Self {{\n        self.{field} = Some({field});\n        self\n    }}",
-                    field = f.name,
-                    vo = vo,
+                    field = f.name, vo = vo,
                 )
             } else if is_value_object(f) {
                 let vo = f.value_object.as_deref().unwrap();
                 format!(
                     "    pub fn with_{field}(mut self, {field}: {vo}) -> Self {{\n        self.{field} = Some({field});\n        self\n    }}",
-                    field = f.name,
-                    vo = vo,
+                    field = f.name, vo = vo,
                 )
             } else {
                 let (param_type, conversion) = mother_with_param(&f.field_type, &f.name);
                 format!(
                     "    pub fn with_{field}(mut self, {field}: {param_type}) -> Self {{\n        self.{field} = Some({conversion});\n        self\n    }}",
-                    field = f.name,
-                    param_type = param_type,
-                    conversion = conversion,
+                    field = f.name, param_type = param_type, conversion = conversion,
                 )
             }
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-    let empty_methods: Vec<String> = required_string_fields
+    let empty_methods = required_string_fields
         .iter()
-        .map(|f| {
-            format!(
-                "    pub fn with_empty_{field}(mut self) -> Self {{\n        self.{field} = Some(String::new());\n        self\n    }}",
-                field = f.name,
-            )
-        })
-        .collect();
+        .map(|f| format!(
+            "    pub fn with_empty_{field}(mut self) -> Self {{\n        self.{field} = Some(String::new());\n        self\n    }}",
+            field = f.name,
+        ))
+        .collect::<Vec<_>>();
+    let empty_methods_str = if empty_methods.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", empty_methods.join("\n\n"))
+    };
 
-    let build_assignments: Vec<String> = eff
+    let build_assignments_str = eff
         .iter()
         .map(|f| {
             if is_option_vo(f) {
@@ -470,149 +359,54 @@ pub fn generate_mother(
             } else if is_enum_vo(f) {
                 let vo = f.value_object.as_deref().unwrap();
                 let first_variant = f.enum_variants.as_deref().unwrap().first().unwrap();
-                format!(
-                    "            {}: self.{}.unwrap_or_else(|| {}::{}),",
-                    f.name, f.name, vo, first_variant
-                )
+                format!("            {}: self.{}.unwrap_or_else(|| {}::{}),", f.name, f.name, vo, first_variant)
             } else if is_value_object(f) {
                 let vo = f.value_object.as_deref().unwrap();
                 let mapping = resolve_type(&f.field_type).unwrap();
                 match mapping.rust_type {
-                    "String" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| {}::new(\"example\".to_string()).expect(\"valid {}\")),",
-                        f.name, f.name, vo, vo
-                    ),
-                    "i64" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| {}::new(42).expect(\"valid {}\")),",
-                        f.name, f.name, vo, vo
-                    ),
-                    "bool" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| {}::new(true).expect(\"valid {}\")),",
-                        f.name, f.name, vo, vo
-                    ),
-                    "f64" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| {}::new(1.5).expect(\"valid {}\")),",
-                        f.name, f.name, vo, vo
-                    ),
-                    "Uuid" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| {}::new(Uuid::new_v4()).expect(\"valid {}\")),",
-                        f.name, f.name, vo, vo
-                    ),
-                    "DateTime<Utc>" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| {}::new(Utc::now()).expect(\"valid {}\")),",
-                        f.name, f.name, vo, vo
-                    ),
-                    _ => format!(
-                        "            {}: self.{}.unwrap_or_default(),",
-                        f.name, f.name
-                    ),
+                    "String" => format!("            {}: self.{}.unwrap_or_else(|| {}::new(\"example\".to_string()).expect(\"valid {}\")),", f.name, f.name, vo, vo),
+                    "i64" => format!("            {}: self.{}.unwrap_or_else(|| {}::new(42).expect(\"valid {}\")),", f.name, f.name, vo, vo),
+                    "bool" => format!("            {}: self.{}.unwrap_or_else(|| {}::new(true).expect(\"valid {}\")),", f.name, f.name, vo, vo),
+                    "f64" => format!("            {}: self.{}.unwrap_or_else(|| {}::new(1.5).expect(\"valid {}\")),", f.name, f.name, vo, vo),
+                    "Uuid" => format!("            {}: self.{}.unwrap_or_else(|| {}::new(Uuid::new_v4()).expect(\"valid {}\")),", f.name, f.name, vo, vo),
+                    "DateTime<Utc>" => format!("            {}: self.{}.unwrap_or_else(|| {}::new(Utc::now()).expect(\"valid {}\")),", f.name, f.name, vo, vo),
+                    _ => format!("            {}: self.{}.unwrap_or_default(),", f.name, f.name),
                 }
             } else if is_option_type(&f.field_type) {
                 format!("            {}: self.{},", f.name, f.name)
             } else {
                 let mapping = resolve_type(&f.field_type).unwrap();
                 match mapping.rust_type {
-                    "String" => format!(
-                        "            {}: self.{}.unwrap_or_else(|| \"example\".to_string()),",
-                        f.name, f.name
-                    ),
+                    "String" => format!("            {}: self.{}.unwrap_or_else(|| \"example\".to_string()),", f.name, f.name),
                     "i64" => format!("            {}: self.{}.unwrap_or(42),", f.name, f.name),
                     "bool" => format!("            {}: self.{}.unwrap_or(true),", f.name, f.name),
                     "f64" => format!("            {}: self.{}.unwrap_or(1.5),", f.name, f.name),
-                    "Uuid" => format!(
-                        "            {}: self.{}.unwrap_or_else(Uuid::new_v4),",
-                        f.name, f.name
-                    ),
-                    "DateTime<Utc>" => format!(
-                        "            {}: self.{}.unwrap_or_else(Utc::now),",
-                        f.name, f.name
-                    ),
-                    "Vec<String>" | "Vec<i64>" => format!(
-                        "            {}: self.{}.unwrap_or_default(),",
-                        f.name, f.name
-                    ),
-                    "HashMap<String, String>" => format!(
-                        "            {}: self.{}.unwrap_or_default(),",
-                        f.name, f.name
-                    ),
-                    _ => format!(
-                        "            {}: self.{}.unwrap_or_default(),",
-                        f.name, f.name
-                    ),
+                    "Uuid" => format!("            {}: self.{}.unwrap_or_else(Uuid::new_v4),", f.name, f.name),
+                    "DateTime<Utc>" => format!("            {}: self.{}.unwrap_or_else(Utc::now),", f.name, f.name),
+                    _ => format!("            {}: self.{}.unwrap_or_default(),", f.name, f.name),
                 }
             }
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let props_assignments: Vec<String> = build_assignments.clone();
+    let defaults = eff
+        .iter()
+        .map(|f| format!("{}: None", f.name))
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    let imports_str = if mother_imports.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}", mother_imports.join("\n"))
-    };
-
-    let fields_str = mother_fields.join("\n");
-    let with_methods_str = with_methods.join("\n\n");
-    let empty_methods_str = if empty_methods.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n{}", empty_methods.join("\n\n"))
-    };
-    let build_assignments_str = build_assignments.join("\n");
-    let props_assignments_str = props_assignments.join("\n");
-
-    format!(
-        "use crate::domain::{snake}::model::{pascal};
-use crate::domain::{snake}::model::{pascal}Props;{imports}
-
-pub struct {pascal}Mother {{
-{fields}
-}}
-
-impl {pascal}Mother {{
-    pub fn new() -> Self {{
-        Self {{ {defaults} }}
-    }}
-
-{with_methods}{empty_methods}
-
-    pub fn build(self) -> {pascal} {{
-        {pascal}::new({pascal}Props {{
-{build_assignments}
-        }})
-        .expect(\"{pascal}Mother: failed to build valid {pascal}\")
-    }}
-
-    pub fn build_props(self) -> {pascal}Props {{
-        {pascal}Props {{
-{props_assignments}
-        }}
-    }}
-
-    pub fn random() -> {pascal} {{
-        Self::new().build()
-    }}
-
-    pub fn random_vec(n: usize) -> Vec<{pascal}> {{
-        (0..n).map(|_| Self::random()).collect()
-    }}
-}}
-",
-        imports = imports_str,
-        pascal = pascal,
-        snake = snake,
-        fields = fields_str,
-        defaults = eff
-            .iter()
-            .map(|f| format!("{}: None", f.name))
-            .collect::<Vec<_>>()
-            .join(", "),
-        with_methods = with_methods_str,
-        empty_methods = empty_methods_str,
-        build_assignments = build_assignments_str,
-        props_assignments = props_assignments_str,
-    )
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("imports", &imports_str);
+    ctx.insert("fields_str", &fields_str);
+    ctx.insert("defaults", &defaults);
+    ctx.insert("with_methods_str", &with_methods_str);
+    ctx.insert("empty_methods_str", &empty_methods_str);
+    ctx.insert("build_assignments_str", &build_assignments_str);
+    ctx.insert("props_assignments_str", &build_assignments_str);
+    render("domain/mother.tera", &ctx).expect("mother.tera render failed")
 }
 
 fn is_option_type(field_type: &str) -> bool {
@@ -669,7 +463,6 @@ pub fn generate_value_objects(
         return String::new();
     }
 
-    // Collect file-level imports once (deduplicated)
     let mut file_imports: Vec<String> = vec![format!("use super::errors::{}Error;", pascal)];
     for f in &vo_fields {
         if is_enum_vo(f) {
@@ -691,231 +484,45 @@ pub fn generate_value_objects(
     let mut vo_structs: Vec<String> = vec![];
     for f in &vo_fields {
         let vo = f.value_object.as_deref().unwrap();
-
         if is_enum_vo(f) {
             let variants = f.enum_variants.as_deref().unwrap();
-            let variant_lines: Vec<String> =
-                variants.iter().map(|v| format!("    {},", v)).collect();
-            let from_str_arms: Vec<String> = variants
-                .iter()
-                .map(|v| format!("            \"{}\" => Ok(Self::{}),", v, v))
-                .collect();
-            let as_str_arms: Vec<String> = variants
-                .iter()
-                .map(|v| format!("            Self::{} => \"{}\",", v, v))
-                .collect();
+            let variant_lines = variants.iter().map(|v| format!("    {},", v)).collect::<Vec<_>>().join("\n");
+            let from_str_arms = variants.iter().map(|v| format!("            \"{}\" => Ok(Self::{}),", v, v)).collect::<Vec<_>>().join("\n");
+            let as_str_arms = variants.iter().map(|v| format!("            Self::{} => \"{}\",", v, v)).collect::<Vec<_>>().join("\n");
             let unknown_arm = format!("            _ => Err({pascal}Error::Invalid{vo}),");
             vo_structs.push(format!(
-                r#"#[derive(Debug, Clone, PartialEq)]
-pub enum {vo} {{
-{variant_lines}
-}}
-
-impl {vo} {{
-    pub fn from_str(s: &str) -> Result<Self, {pascal}Error> {{
-        match s {{
-{from_str_arms}
-{unknown_arm}
-        }}
-    }}
-
-    pub fn as_str(&self) -> &'static str {{
-        match self {{
-{as_str_arms}
-        }}
-    }}
-}}"#,
-                pascal = pascal,
-                vo = vo,
-                variant_lines = variant_lines.join("\n"),
-                from_str_arms = from_str_arms.join("\n"),
-                unknown_arm = unknown_arm,
-                as_str_arms = as_str_arms.join("\n"),
+                "#[derive(Debug, Clone, PartialEq)]\npub enum {vo} {{\n{variant_lines}\n}}\n\nimpl {vo} {{\n    pub fn from_str(s: &str) -> Result<Self, {pascal}Error> {{\n        match s {{\n{from_str_arms}\n{unknown_arm}\n        }}\n    }}\n\n    pub fn as_str(&self) -> &'static str {{\n        match self {{\n{as_str_arms}\n        }}\n    }}\n}}"
             ));
             continue;
         }
-
         let inner_type = vo_inner_type(f);
         let struct_code = match inner_type.as_str() {
             "String" => format!(
-                r#"#[derive(Debug, Clone, PartialEq)]
-pub struct {vo} {{
-    value: String,
-}}
-
-impl {vo} {{
-    pub fn new(value: String) -> Result<Self, {pascal}Error> {{
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {{
-            return Err({pascal}Error::Invalid{vo});
-        }}
-        Ok(Self {{ value: trimmed }})
-    }}
-
-    pub fn value(&self) -> &str {{
-        &self.value
-    }}
-}}"#,
-                pascal = pascal,
-                vo = vo,
+                "#[derive(Debug, Clone, PartialEq)]\npub struct {vo} {{\n    value: String,\n}}\n\nimpl {vo} {{\n    pub fn new(value: String) -> Result<Self, {pascal}Error> {{\n        let trimmed = value.trim().to_string();\n        if trimmed.is_empty() {{\n            return Err({pascal}Error::Invalid{vo});\n        }}\n        Ok(Self {{ value: trimmed }})\n    }}\n\n    pub fn value(&self) -> &str {{\n        &self.value\n    }}\n}}"
             ),
-            "i64" | "f64" | "bool" => {
-                let ret_type = inner_type.clone();
-                format!(
-                    r#"#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct {vo}({ret_type});
-
-impl {vo} {{
-    pub fn new(value: {ret_type}) -> Result<Self, {pascal}Error> {{
-        Ok(Self(value))
-    }}
-
-    pub fn value(&self) -> {ret_type} {{
-        self.0
-    }}
-}}"#,
-                    pascal = pascal,
-                    vo = vo,
-                    ret_type = ret_type,
-                )
-            }
+            "i64" | "f64" | "bool" => format!(
+                "#[derive(Debug, Clone, Copy, PartialEq)]\npub struct {vo}({inner_type});\n\nimpl {vo} {{\n    pub fn new(value: {inner_type}) -> Result<Self, {pascal}Error> {{\n        Ok(Self(value))\n    }}\n\n    pub fn value(&self) -> {inner_type} {{\n        self.0\n    }}\n}}"
+            ),
             "Uuid" => format!(
-                r#"#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct {vo}(Uuid);
-
-impl {vo} {{
-    pub fn new(value: Uuid) -> Result<Self, {pascal}Error> {{
-        Ok(Self(value))
-    }}
-
-    pub fn value(&self) -> Uuid {{
-        self.0
-    }}
-}}"#,
-                pascal = pascal,
-                vo = vo,
+                "#[derive(Debug, Clone, Copy, PartialEq)]\npub struct {vo}(Uuid);\n\nimpl {vo} {{\n    pub fn new(value: Uuid) -> Result<Self, {pascal}Error> {{\n        Ok(Self(value))\n    }}\n\n    pub fn value(&self) -> Uuid {{\n        self.0\n    }}\n}}"
             ),
             "DateTime<Utc>" => format!(
-                r#"#[derive(Debug, Clone, PartialEq)]
-pub struct {vo}(DateTime<Utc>);
-
-impl {vo} {{
-    pub fn new(value: DateTime<Utc>) -> Result<Self, {pascal}Error> {{
-        Ok(Self(value))
-    }}
-
-    pub fn value(&self) -> DateTime<Utc> {{
-        self.0
-    }}
-}}"#,
-                pascal = pascal,
-                vo = vo,
+                "#[derive(Debug, Clone, PartialEq)]\npub struct {vo}(DateTime<Utc>);\n\nimpl {vo} {{\n    pub fn new(value: DateTime<Utc>) -> Result<Self, {pascal}Error> {{\n        Ok(Self(value))\n    }}\n\n    pub fn value(&self) -> DateTime<Utc> {{\n        self.0\n    }}\n}}"
             ),
             _ => continue,
         };
         vo_structs.push(struct_code);
     }
 
-    format!("{}\n\n{}", file_imports.join("\n"), vo_structs.join("\n\n"))
+    let file_imports_str = file_imports.join("\n");
+    let vo_structs_str = vo_structs.join("\n\n");
+    let mut ctx = tera::Context::new();
+    ctx.insert("file_imports", &file_imports_str);
+    ctx.insert("vo_structs", &vo_structs_str);
+    render("domain/value_objects.tera", &ctx).expect("value_objects.tera render failed")
 }
 
-pub fn generate_errors(
-    pascal: &str,
-    snake: &str,
-    fields: &[Field],
-    _shared_vos: &[ValueObjectDefinition],
-) -> String {
-    let eff = effective_fields(fields);
-    let vo_fields: Vec<&Field> = eff.iter().filter(|f| is_value_object(f)).collect();
 
-    let mut vo_variants: Vec<String> = vec![];
-    for f in &vo_fields {
-        let vo = f.value_object.as_deref().unwrap();
-        vo_variants.push(format!(
-            "    #[error(\"{snake}.invalid_{vo_snake}\")]\n    Invalid{vo},",
-            snake = snake,
-            vo_snake = pascal_to_snake(vo),
-            vo = vo,
-        ));
-    }
-
-    let vo_variants_str = if vo_variants.is_empty() {
-        String::new()
-    } else {
-        vo_variants.join("\n") + "\n"
-    };
-
-    format!(
-        r#"use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum {pascal}Error {{
-    #[error("{snake}.validation_error.{{0}}")]
-    ValidationError(String),
-    #[error("{snake}.not_found")]
-    NotFound,
-    #[error("{snake}.duplicate")]
-    Duplicate,
-    #[error("{snake}.repository_error")]
-    RepositoryError,
-    #[error("{snake}.unknown")]
-    Unknown,
-{vo_variants}}}
-"#,
-        pascal = pascal,
-        snake = snake,
-        vo_variants = vo_variants_str,
-    )
-}
-
-pub(crate) const ERRORS: &str = r#"use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum {Pascal}Error {
-    #[error("{snake}.validation_error.{0}")]
-    ValidationError(String),
-    #[error("{snake}.not_found")]
-    NotFound,
-    #[error("{snake}.duplicate")]
-    Duplicate,
-    #[error("{snake}.repository_error")]
-    RepositoryError,
-    #[error("{snake}.unknown")]
-    Unknown,
-}
-"#;
-
-const CRUD_REPOSITORY: &str = r#"use async_trait::async_trait;
-use uuid::Uuid;
-
-use super::{errors::{Pascal}Error, model::{Pascal}};
-
-#[async_trait]
-pub trait {Pascal}RepositoryTrait: Send + Sync {
-    async fn find_all(&self) -> Result<Vec<{Pascal}>, {Pascal}Error>;
-    async fn find_by_id(&self, id: Uuid) -> Result<Option<{Pascal}>, {Pascal}Error>;
-    async fn save(&self, entity: &{Pascal}) -> Result<(), {Pascal}Error>;
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub mod mocks {
-    use mockall::mock;
-    use uuid::Uuid;
-
-    use super::*;
-
-    mock! {
-        pub {Pascal}Repository {}
-
-        #[async_trait]
-        impl {Pascal}RepositoryTrait for {Pascal}Repository {
-            async fn find_all(&self) -> Result<Vec<{Pascal}>, {Pascal}Error>;
-            async fn find_by_id(&self, id: Uuid) -> Result<Option<{Pascal}>, {Pascal}Error>;
-            async fn save(&self, entity: &{Pascal}) -> Result<(), {Pascal}Error>;
-        }
-    }
-}
-"#;
 
 pub fn generate_create_use_case_trait(pascal: &str, snake: &str, fields: &[Field]) -> String {
     let eff = effective_fields(fields);
@@ -932,118 +539,20 @@ pub fn generate_create_use_case_trait(pascal: &str, snake: &str, fields: &[Field
         }
     }
 
-    let params_fields: Vec<String> = eff
+    let params_fields: Vec<serde_json::Value> = eff
         .iter()
         .filter(|f| f.field_type != "Uuid")
-        .map(|f| format!("    pub {}: {},", f.name, f.field_type))
+        .map(|f| json!({ "name": f.name, "field_type": f.field_type }))
         .collect();
 
-    let imports_str = if extra_imports.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}", extra_imports.join("\n"))
-    };
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("extra_imports", &extra_imports);
+    ctx.insert("params_fields", &params_fields);
 
-    let params_fields_str = params_fields.join("\n");
-
-    format!(
-        r#"use async_trait::async_trait;{imports}
-
-use crate::domain::{snake}::{{errors::{pascal}Error, model::{pascal}}};
-
-#[derive(Debug, Clone)]
-pub struct Create{pascal}Params {{
-{params_fields}
-}}
-
-#[async_trait]
-pub trait Create{pascal}UseCaseTrait: Send + Sync {{
-    async fn execute(&self, params: Create{pascal}Params) -> Result<{pascal}, {pascal}Error>;
-}}
-"#,
-        imports = imports_str,
-        pascal = pascal,
-        snake = snake,
-        params_fields = params_fields_str,
-    )
+    render("domain/use_case_create.tera", &ctx).expect("use_case_create.tera render failed")
 }
-
-pub(crate) const USE_CASE_TRAIT: &str = r#"use async_trait::async_trait;
-
-use crate::domain::{snake}::{errors::{Pascal}Error, model::{Pascal}};
-
-#[derive(Debug, Clone)]
-pub struct Create{Pascal}Params {
-    pub name: String,
-}
-
-#[async_trait]
-pub trait Create{Pascal}UseCaseTrait: Send + Sync {
-    async fn execute(&self, params: Create{Pascal}Params) -> Result<{Pascal}, {Pascal}Error>;
-}
-"#;
-
-const GET_USE_CASE_TRAIT: &str = r#"use async_trait::async_trait;
-use uuid::Uuid;
-
-use crate::domain::{snake}::{errors::{Pascal}Error, model::{Pascal}};
-
-#[derive(Debug, Clone)]
-pub struct Get{Pascal}Params {
-    pub id: Uuid,
-}
-
-#[async_trait]
-pub trait Get{Pascal}UseCaseTrait: Send + Sync {
-    async fn execute(&self, params: Get{Pascal}Params) -> Result<{Pascal}, {Pascal}Error>;
-}
-"#;
-
-const LIST_USE_CASE_TRAIT: &str = r#"use async_trait::async_trait;
-
-use crate::domain::{snake}::{errors::{Pascal}Error, model::{Pascal}};
-
-#[derive(Debug)]
-pub struct List{Pascal}Params;
-
-#[async_trait]
-pub trait List{Pascal}UseCaseTrait: Send + Sync {
-    async fn execute(&self, params: List{Pascal}Params) -> Result<Vec<{Pascal}>, {Pascal}Error>;
-}
-"#;
-
-const UPDATE_USE_CASE_TRAIT: &str = r#"use async_trait::async_trait;
-use uuid::Uuid;
-
-use crate::domain::{snake}::{errors::{Pascal}Error, model::{Pascal}};
-
-#[derive(Debug, Clone)]
-pub struct Update{Pascal}Params {
-    pub id: Uuid,
-    pub name: String,
-}
-
-#[async_trait]
-pub trait Update{Pascal}UseCaseTrait: Send + Sync {
-    async fn execute(&self, params: Update{Pascal}Params) -> Result<{Pascal}, {Pascal}Error>;
-}
-"#;
-
-const DELETE_USE_CASE_TRAIT: &str = r#"use async_trait::async_trait;
-use uuid::Uuid;
-
-use crate::domain::{snake}::errors::{Pascal}Error;
-
-#[derive(Debug, Clone)]
-pub struct Delete{Pascal}Params {
-    pub id: Uuid,
-}
-
-#[async_trait]
-pub trait Delete{Pascal}UseCaseTrait: Send + Sync {
-    async fn execute(&self, params: Delete{Pascal}Params) -> Result<(), {Pascal}Error>;
-}
-"#;
 
 pub fn generate_update_use_case_trait(pascal: &str, snake: &str, fields: &[Field]) -> String {
     let eff = effective_fields(fields);
@@ -1060,42 +569,19 @@ pub fn generate_update_use_case_trait(pascal: &str, snake: &str, fields: &[Field
         }
     }
 
-    let mut params_fields = vec!["    pub id: Uuid,".to_string()];
-    for f in &eff {
-        if f.field_type != "Uuid" {
-            params_fields.push(format!("    pub {}: {},", f.name, f.field_type));
-        }
-    }
+    let params_fields: Vec<serde_json::Value> = eff
+        .iter()
+        .filter(|f| f.field_type != "Uuid")
+        .map(|f| json!({ "name": f.name, "field_type": f.field_type }))
+        .collect();
 
-    let imports_str = if extra_imports.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}", extra_imports.join("\n"))
-    };
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
+    ctx.insert("extra_imports", &extra_imports);
+    ctx.insert("params_fields", &params_fields);
 
-    let params_fields_str = params_fields.join("\n");
-
-    format!(
-        r#"use async_trait::async_trait;
-use uuid::Uuid;{imports}
-
-use crate::domain::{snake}::{{errors::{pascal}Error, model::{pascal}}};
-
-#[derive(Debug, Clone)]
-pub struct Update{pascal}Params {{
-{params_fields}
-}}
-
-#[async_trait]
-pub trait Update{pascal}UseCaseTrait: Send + Sync {{
-    async fn execute(&self, params: Update{pascal}Params) -> Result<{pascal}, {pascal}Error>;
-}}
-"#,
-        imports = imports_str,
-        pascal = pascal,
-        snake = snake,
-        params_fields = params_fields_str,
-    )
+    render("domain/use_case_update.tera", &ctx).expect("use_case_update.tera render failed")
 }
 
 pub fn generate_shared_value_objects(vos: &[ValueObjectDefinition]) -> String {
@@ -1109,92 +595,26 @@ pub fn generate_shared_value_objects(vos: &[ValueObjectDefinition]) -> String {
         let inner = &vo_def.inner_type;
         let struct_code = match inner.as_str() {
             "String" => format!(
-                r#"use super::errors::{vo}Error;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct {vo} {{
-    value: String,
-}}
-
-impl {vo} {{
-    pub fn new(value: String) -> Result<Self, {vo}Error> {{
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {{
-            return Err({vo}Error::Invalid);
-        }}
-        Ok(Self {{ value: trimmed }})
-    }}
-
-    pub fn value(&self) -> &str {{
-        &self.value
-    }}
-}}"#,
-                vo = vo,
+                "use super::errors::{vo}Error;\n\n#[derive(Debug, Clone, PartialEq)]\npub struct {vo} {{\n    value: String,\n}}\n\nimpl {vo} {{\n    pub fn new(value: String) -> Result<Self, {vo}Error> {{\n        let trimmed = value.trim().to_string();\n        if trimmed.is_empty() {{\n            return Err({vo}Error::Invalid);\n        }}\n        Ok(Self {{ value: trimmed }})\n    }}\n\n    pub fn value(&self) -> &str {{\n        &self.value\n    }}\n}}"
             ),
-            "i64" | "f64" | "bool" => {
-                let copy_trait = "Copy";
-                format!(
-                    r#"use super::errors::{vo}Error;
-
-#[derive(Debug, Clone, {copy_trait}, PartialEq)]
-pub struct {vo}({inner});
-
-impl {vo} {{
-    pub fn new(value: {inner}) -> Result<Self, {vo}Error> {{
-        Ok(Self(value))
-    }}
-
-    pub fn value(&self) -> {inner} {{
-        self.0
-    }}
-}}"#,
-                    vo = vo,
-                    inner = inner,
-                    copy_trait = copy_trait,
-                )
-            }
+            "i64" | "f64" | "bool" => format!(
+                "use super::errors::{vo}Error;\n\n#[derive(Debug, Clone, Copy, PartialEq)]\npub struct {vo}({inner});\n\nimpl {vo} {{\n    pub fn new(value: {inner}) -> Result<Self, {vo}Error> {{\n        Ok(Self(value))\n    }}\n\n    pub fn value(&self) -> {inner} {{\n        self.0\n    }}\n}}"
+            ),
             "Uuid" => format!(
-                r#"use super::errors::{vo}Error;
-use uuid::Uuid;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct {vo}(Uuid);
-
-impl {vo} {{
-    pub fn new(value: Uuid) -> Result<Self, {vo}Error> {{
-        Ok(Self(value))
-    }}
-
-    pub fn value(&self) -> Uuid {{
-        self.0
-    }}
-}}"#,
-                vo = vo,
+                "use super::errors::{vo}Error;\nuse uuid::Uuid;\n\n#[derive(Debug, Clone, Copy, PartialEq)]\npub struct {vo}(Uuid);\n\nimpl {vo} {{\n    pub fn new(value: Uuid) -> Result<Self, {vo}Error> {{\n        Ok(Self(value))\n    }}\n\n    pub fn value(&self) -> Uuid {{\n        self.0\n    }}\n}}"
             ),
             "DateTime<Utc>" => format!(
-                r#"use super::errors::{vo}Error;
-use chrono::{{DateTime, Utc}};
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct {vo}(DateTime<Utc>);
-
-impl {vo} {{
-    pub fn new(value: DateTime<Utc>) -> Result<Self, {vo}Error> {{
-        Ok(Self(value))
-    }}
-
-    pub fn value(&self) -> DateTime<Utc> {{
-        self.0
-    }}
-}}"#,
-                vo = vo,
+                "use super::errors::{vo}Error;\nuse chrono::{{DateTime, Utc}};\n\n#[derive(Debug, Clone, PartialEq)]\npub struct {vo}(DateTime<Utc>);\n\nimpl {vo} {{\n    pub fn new(value: DateTime<Utc>) -> Result<Self, {vo}Error> {{\n        Ok(Self(value))\n    }}\n\n    pub fn value(&self) -> DateTime<Utc> {{\n        self.0\n    }}\n}}"
             ),
             _ => continue,
         };
         vo_structs.push(struct_code);
     }
 
-    vo_structs.join("\n\n")
+    let vo_structs_str = vo_structs.join("\n\n");
+    let mut ctx = tera::Context::new();
+    ctx.insert("vo_structs", &vo_structs_str);
+    render("domain/shared_value_objects.tera", &ctx).expect("shared_value_objects.tera render failed")
 }
 
 #[allow(dead_code)]
@@ -1236,21 +656,21 @@ pub fn generate_shared_errors_combined(vos: &[ValueObjectDefinition]) -> String 
         return String::new();
     }
 
-    let mut error_defs: Vec<String> = vec![];
-    for vo_def in vos {
-        let vo = &vo_def.name;
-        let vo_snake = pascal_to_snake(vo);
-        error_defs.push(format!(
-            r#"#[derive(Debug, Error)]
-pub enum {vo}Error {{
-    #[error("shared.value_object.{}.invalid")]
-    Invalid,
-}}"#,
-            vo_snake
-        ));
-    }
+    let error_defs = vos
+        .iter()
+        .map(|vo_def| {
+            let vo = &vo_def.name;
+            let vo_snake = pascal_to_snake(vo);
+            format!(
+                "#[derive(Debug, Error)]\npub enum {vo}Error {{\n    #[error(\"shared.value_object.{vo_snake}.invalid\")]\n    Invalid,\n}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-    format!("use thiserror::Error;\n\n{}", error_defs.join("\n\n"))
+    let mut ctx = tera::Context::new();
+    ctx.insert("error_defs", &error_defs);
+    render("domain/shared_errors.tera", &ctx).expect("shared_errors.tera render failed")
 }
 
 pub fn write_shared_vo_files(
@@ -1294,19 +714,24 @@ pub fn write_domain_files(
         &generate_model(pascal, snake, fields, shared_vos),
     )?;
 
-    let has_vo = effective_fields(fields).iter().any(is_value_object);
-    let has_local_vo = effective_fields(fields)
-        .iter()
-        .any(|f| is_value_object(f) && !is_shared_vo(f, shared_vos));
+    let eff = effective_fields(fields);
+    let has_local_vo = eff.iter().any(|f| is_value_object(f) && !is_shared_vo(f, shared_vos));
 
-    let errors_content = if has_vo {
-        generate_errors(pascal, snake, fields, shared_vos)
-    } else {
-        apply(ERRORS, pascal, snake)
-    };
+    let vo_fields: Vec<serde_json::Value> = eff
+        .iter()
+        .filter(|f| is_value_object(f))
+        .map(|f| {
+            let vo = f.value_object.as_deref().unwrap();
+            json!({ "vo_pascal": vo, "vo_snake": pascal_to_snake(vo) })
+        })
+        .collect();
+    let mut errors_ctx = tera::Context::new();
+    errors_ctx.insert("pascal", pascal);
+    errors_ctx.insert("snake", snake);
+    errors_ctx.insert("vo_fields", &vo_fields);
     write_file(
         &base.join(format!("business/src/domain/{snake}/errors.rs")),
-        &errors_content,
+        &render("domain/errors.tera", &errors_ctx)?,
     )?;
 
     if has_local_vo {
@@ -1317,49 +742,42 @@ pub fn write_domain_files(
         )?;
     }
 
+    let mut ctx = tera::Context::new();
+    ctx.insert("pascal", pascal);
+    ctx.insert("snake", snake);
     write_file(
         &base.join(format!("business/src/domain/{snake}/repository.rs")),
-        &apply(CRUD_REPOSITORY, pascal, snake),
+        &render("domain/repository.tera", &ctx)?,
     )?;
-    let create_uc = if fields.is_empty() {
-        apply(USE_CASE_TRAIT, pascal, snake)
-    } else {
-        generate_create_use_case_trait(pascal, snake, fields)
-    };
     write_file(
         &base.join(format!(
             "business/src/domain/{snake}/use_cases/create_{snake}.rs"
         )),
-        &create_uc,
+        &generate_create_use_case_trait(pascal, snake, fields),
     )?;
     write_file(
         &base.join(format!(
             "business/src/domain/{snake}/use_cases/get_{snake}.rs"
         )),
-        &apply(GET_USE_CASE_TRAIT, pascal, snake),
+        &render("domain/use_case_get.tera", &ctx)?,
     )?;
     write_file(
         &base.join(format!(
             "business/src/domain/{snake}/use_cases/list_{snake}.rs"
         )),
-        &apply(LIST_USE_CASE_TRAIT, pascal, snake),
+        &render("domain/use_case_list.tera", &ctx)?,
     )?;
-    let update_uc = if fields.is_empty() {
-        apply(UPDATE_USE_CASE_TRAIT, pascal, snake)
-    } else {
-        generate_update_use_case_trait(pascal, snake, fields)
-    };
     write_file(
         &base.join(format!(
             "business/src/domain/{snake}/use_cases/update_{snake}.rs"
         )),
-        &update_uc,
+        &generate_update_use_case_trait(pascal, snake, fields),
     )?;
     write_file(
         &base.join(format!(
             "business/src/domain/{snake}/use_cases/delete_{snake}.rs"
         )),
-        &apply(DELETE_USE_CASE_TRAIT, pascal, snake),
+        &render("domain/use_case_delete.tera", &ctx)?,
     )?;
     Ok(())
 }

@@ -1,5 +1,5 @@
 .PHONY: help setup run \
-        test test/domain test/application \
+        test test/domain test/application test/infrastructure \
         lint format format/fix check clean \
         audit audit/fix \
         generate/entity generate/use-case generate/bootstrap
@@ -39,6 +39,10 @@ test/domain: ## Run domain layer tests
 test/application: ## Run application layer tests
 	@echo "${YELLOW}Running application layer tests...${NC}"
 	$(CARGO) nextest run -p business -E 'test(application)'
+
+test/infrastructure: ## Run infrastructure layer tests (requires DB)
+	@echo "${YELLOW}Running infrastructure tests...${NC}"
+	$(CARGO) nextest run -p infrastructure
 
 lint: ## Clippy with -D warnings
 	@echo "${CYAN}Linting code...${NC}"

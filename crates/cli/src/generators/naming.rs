@@ -26,20 +26,6 @@ pub fn pascal_to_snake(s: &str) -> String {
     out
 }
 
-pub fn apply(template: &str, pascal: &str, snake: &str) -> String {
-    template
-        .replace("{Pascal}", pascal)
-        .replace("{snake}", snake)
-}
-
-pub fn apply_uc(template: &str, pascal: &str, snake: &str, uc_pascal: &str, uc: &str) -> String {
-    template
-        .replace("{Pascal}", pascal)
-        .replace("{snake}", snake)
-        .replace("{uc_pascal}", uc_pascal)
-        .replace("{uc}", uc)
-}
-
 pub fn write_file(path: &Path, content: &str) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

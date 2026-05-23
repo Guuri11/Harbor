@@ -1,0 +1,149 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use business::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    model::{{ pascal }},
+    repository::{{ pascal }}RepositoryTrait,
+};
+use business::domain::logger::LoggerTrait;
+
+use super::entity::{{ pascal }}Db;
+
+pub struct Pg{{ pascal }}Repository {
+    pub pool: PgPool,
+    logger: Arc<dyn LoggerTrait>,
+}
+
+impl Pg{{ pascal }}Repository {
+    pub fn new(pool: PgPool, logger: Arc<dyn LoggerTrait>) -> Self {
+        Self { pool, logger }
+    }
+}
+
+#[async_trait]
+impl {{ pascal }}RepositoryTrait for Pg{{ pascal }}Repository {
+    async fn find_all(&self) -> Result<Vec<{{ pascal }}>, {{ pascal }}Error> {
+        self.logger.debug("find_all");
+        let rows = sqlx::query_as!(
+            {{ pascal }}Db,
+            "SELECT {{ all_cols }}
+             FROM {{ snake }}s WHERE deleted = false ORDER BY created_at DESC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            self.logger.error(&format!("find_all error: {e}"));
+            {{ pascal }}Error::RepositoryError
+        })?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<{{ pascal }}>, {{ pascal }}Error> {
+        self.logger.debug(&format!("find_by_id: {id}"));
+        let row = sqlx::query_as!(
+            {{ pascal }}Db,
+            "SELECT {{ all_cols }}
+             FROM {{ snake }}s WHERE id = $1 AND deleted = false",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            self.logger.error(&format!("find_by_id error: {e}"));
+            {{ pascal }}Error::RepositoryError
+        })?;
+
+        row.map(|r| r.try_into()).transpose()
+    }
+
+    async fn save(&self, entity: &{{ pascal }}) -> Result<(), {{ pascal }}Error> {
+        self.logger.debug(&format!("save: {}", entity.id));
+        let db = {{ pascal }}Db::from(entity);
+        sqlx::query!(
+            "INSERT INTO {{ snake }}s ({{ all_cols }})
+             VALUES ({{ all_params }})
+             ON CONFLICT (id) DO UPDATE
+             SET {{ all_updates }}",
+{{ all_bindings }}
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if let Some(db_err) = e.as_database_error() {
+                if db_err.code().map_or(false, |c| c == "23505") {
+                    return {{ pascal }}Error::Duplicate;
+                }
+            }
+            self.logger.error(&format!("save error: {e}"));
+            {{ pascal }}Error::RepositoryError
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use business::domain::{{ snake }}::model::{{ pascal }}Props;
+    use std::sync::Arc;
+{{ vo_test_imports }}
+    struct TestLogger;
+    impl business::domain::logger::LoggerTrait for TestLogger {
+        fn info(&self, _: &str) {}
+        fn warn(&self, _: &str) {}
+        fn error(&self, _: &str) {}
+        fn debug(&self, _: &str) {}
+    }
+
+    fn test_repo(pool: PgPool) -> Pg{{ pascal }}Repository {
+        Pg{{ pascal }}Repository::new(pool, Arc::new(TestLogger))
+    }
+
+{{ seed_fn }}
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_persist_and_retrieve_by_id(pool: PgPool) {
+        // Arrange
+        let entity = seed(&pool).await;
+
+        // Act
+        let found = test_repo(pool).find_by_id(entity.id).await.unwrap().unwrap();
+
+        // Assert
+        assert_eq!(found.id, entity.id);
+{{ field_asserts }}
+        assert!(!found.deleted);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_return_none_for_nonexistent_id(pool: PgPool) {
+        // Act
+        let result = test_repo(pool).find_by_id(Uuid::new_v4()).await.unwrap();
+
+        // Assert
+        assert!(result.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_update_entity_on_save_conflict(pool: PgPool) {
+        // Arrange
+{{ update_test }}
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_list_all_{{ snake }}s_excluding_deleted(pool: PgPool) {
+        // Arrange
+        seed(&pool).await;
+        seed(&pool).await;
+
+        // Act
+        let results = test_repo(pool).find_all().await.unwrap();
+
+        // Assert
+        assert_eq!(results.len(), 2);
+    }
+}

@@ -1,0 +1,33 @@
+use business::domain::{{ snake }}::model::{{ pascal }};
+use poem_openapi::Object;
+use uuid::Uuid;
+
+#[derive(Debug, Object)]
+#[oai(rename_all = "camelCase")]
+pub struct {{ pascal }}Dto {
+    pub id: Uuid,
+{{ dto_fields_str }}
+}
+
+impl {{ pascal }}Dto {
+    pub fn from_domain(entity: &{{ pascal }}) -> Self {
+        Self {
+            id: entity.id,
+{{ dto_from_str }}
+        }
+    }
+}
+
+#[derive(Debug, Object)]
+#[oai(rename_all = "camelCase")]
+pub struct Create{{ pascal }}Request {
+{{ request_fields_str }}
+}
+{% if is_crud %}
+
+#[derive(Debug, Object)]
+#[oai(rename_all = "camelCase")]
+pub struct Update{{ pascal }}Request {
+{{ request_fields_str }}
+}
+{% endif %}

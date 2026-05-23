@@ -1,0 +1,14 @@
+use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::domain::{{ snake }}::errors::{{ pascal }}Error;
+
+#[derive(Debug, Clone)]
+pub struct Delete{{ pascal }}Params {
+    pub id: Uuid,
+}
+
+#[async_trait]
+pub trait Delete{{ pascal }}UseCaseTrait: Send + Sync {
+    async fn execute(&self, params: Delete{{ pascal }}Params) -> Result<(), {{ pascal }}Error>;
+}

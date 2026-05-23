@@ -1,0 +1,104 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    repository::{{ pascal }}RepositoryTrait,
+    use_cases::delete_{{ snake }}::{Delete{{ pascal }}Params, Delete{{ pascal }}UseCaseTrait},
+};
+use crate::domain::logger::LoggerTrait;
+
+pub struct Delete{{ pascal }}UseCaseImpl {
+    pub repository: Arc<dyn {{ pascal }}RepositoryTrait>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[async_trait]
+impl Delete{{ pascal }}UseCaseTrait for Delete{{ pascal }}UseCaseImpl {
+    async fn execute(&self, params: Delete{{ pascal }}Params) -> Result<(), {{ pascal }}Error> {
+        self.logger.info(&format!("Deleting {{ snake }}: {}", params.id));
+        let mut entity = self
+            .repository
+            .find_by_id(params.id)
+            .await
+            .map_err(|e| {
+                self.logger.error(&e.to_string());
+                e
+            })?
+            .ok_or_else(|| {
+                let err = {{ pascal }}Error::NotFound;
+                self.logger.warn(&err.to_string());
+                err
+            })?;
+        let now = chrono::Utc::now();
+        entity.deleted = true;
+        entity.deleted_at = Some(now);
+        entity.updated_at = now;
+        self.repository.save(&entity).await.map_err(|e| {
+            self.logger.error(&e.to_string());
+            e
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{{ snake }}::{
+        model::{{ "{" }}{{ pascal }}, {{ pascal }}Props},
+        repository::mocks::Mock{{ pascal }}Repository,
+    };
+    use crate::domain::logger::mocks::MockLogger;
+    use uuid::Uuid;
+{{ test_vo_imports }}
+    fn silent_logger() -> MockLogger {
+        let mut mock = MockLogger::new();
+        mock.expect_info().returning(|_| ());
+        mock.expect_warn().returning(|_| ());
+        mock.expect_error().returning(|_| ());
+        mock.expect_debug().returning(|_| ());
+        mock
+    }
+
+    #[tokio::test]
+    async fn should_soft_delete_{{ snake }}_when_id_exists() {
+        let entity = {{ pascal }}::new({{ pascal }}Props {
+{{ props_fields }}
+        }).unwrap();
+        let entity_id = entity.id;
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo
+            .expect_find_by_id()
+            .returning(move |_| Ok(Some(entity.clone())));
+        mock_repo.expect_save().returning(|_| Ok(()));
+        let use_case = Delete{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        let result = use_case
+            .execute(Delete{{ pascal }}Params { id: entity_id })
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn should_return_not_found_when_{{ snake }}_does_not_exist() {
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo.expect_find_by_id().returning(|_| Ok(None));
+        let use_case = Delete{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        let result = use_case
+            .execute(Delete{{ pascal }}Params { id: Uuid::new_v4() })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "{{ snake }}.not_found");
+    }
+}

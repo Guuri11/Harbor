@@ -1,0 +1,89 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    model::{{ pascal }},
+    repository::{{ pascal }}RepositoryTrait,
+    use_cases::get_{{ snake }}::{Get{{ pascal }}Params, Get{{ pascal }}UseCaseTrait},
+};
+use crate::domain::logger::LoggerTrait;
+
+pub struct Get{{ pascal }}UseCaseImpl {
+    pub repository: Arc<dyn {{ pascal }}RepositoryTrait>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[async_trait]
+impl Get{{ pascal }}UseCaseTrait for Get{{ pascal }}UseCaseImpl {
+    async fn execute(&self, params: Get{{ pascal }}Params) -> Result<{{ pascal }}, {{ pascal }}Error> {
+        self.logger.info(&format!("Getting {{ snake }}: {}", params.id));
+        let result = self.repository.find_by_id(params.id).await.map_err(|e| {
+            self.logger.error(&e.to_string());
+            e
+        })?;
+        result.ok_or_else(|| {
+            let err = {{ pascal }}Error::NotFound;
+            self.logger.warn(&err.to_string());
+            err
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{{ snake }}::{
+        model::{{ "{" }}{{ pascal }}, {{ pascal }}Props},
+        repository::mocks::Mock{{ pascal }}Repository,
+    };
+    use crate::domain::logger::mocks::MockLogger;
+    use uuid::Uuid;
+{{ test_vo_imports }}
+    fn silent_logger() -> MockLogger {
+        let mut mock = MockLogger::new();
+        mock.expect_info().returning(|_| ());
+        mock.expect_warn().returning(|_| ());
+        mock.expect_error().returning(|_| ());
+        mock.expect_debug().returning(|_| ());
+        mock
+    }
+
+    #[tokio::test]
+    async fn should_return_{{ snake }}_when_id_exists() {
+        let entity = {{ pascal }}::new({{ pascal }}Props {
+{{ props_fields }}
+        }).unwrap();
+        let entity_id = entity.id;
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo
+            .expect_find_by_id()
+            .returning(move |_| Ok(Some(entity.clone())));
+        let use_case = Get{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        let result = use_case.execute(Get{{ pascal }}Params { id: entity_id }).await;
+
+        assert!(result.is_ok());{{ found_assertion }}
+    }
+
+    #[tokio::test]
+    async fn should_return_not_found_when_id_does_not_exist() {
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo.expect_find_by_id().returning(|_| Ok(None));
+        let use_case = Get{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        let result = use_case
+            .execute(Get{{ pascal }}Params { id: Uuid::new_v4() })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "{{ snake }}.not_found");
+    }
+}

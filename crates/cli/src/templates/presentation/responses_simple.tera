@@ -1,27 +1,30 @@
-use crate::api::{error::ErrorResponse, greeting::dto::GreetingDto};
+use crate::api::{error::ErrorResponse, {{ snake }}::dto::{{ pascal }}Dto};
 use poem::http::StatusCode;
 use poem_openapi::{ApiResponse, payload::Json};
 
 #[derive(ApiResponse)]
-pub enum GetGreetingResponse {
-    #[oai(status = 200)]
-    Ok(Json<GreetingDto>),
+pub enum Create{{ pascal }}Response {
+    #[oai(status = 201)]
+    Created(Json<{{ pascal }}Dto>),
     #[oai(status = 400)]
     BadRequest(Json<ErrorResponse>),
     #[oai(status = 401)]
     Unauthorized(Json<ErrorResponse>),
     #[oai(status = 403)]
     Forbidden(Json<ErrorResponse>),
+    #[oai(status = 409)]
+    Conflict(Json<ErrorResponse>),
     #[oai(status = 500)]
     InternalError(Json<ErrorResponse>),
 }
 
-impl GetGreetingResponse {
+impl Create{{ pascal }}Response {
     pub fn from_status(status: StatusCode, error: Json<ErrorResponse>) -> Self {
         match status {
             StatusCode::BAD_REQUEST => Self::BadRequest(error),
             StatusCode::UNAUTHORIZED => Self::Unauthorized(error),
             StatusCode::FORBIDDEN => Self::Forbidden(error),
+            StatusCode::CONFLICT => Self::Conflict(error),
             _ => Self::InternalError(error),
         }
     }

@@ -1,0 +1,13 @@
+use async_trait::async_trait;
+
+use crate::domain::{{ snake }}::{errors::{{ pascal }}Error, model::{{ pascal }}};
+
+#[derive(Debug, Clone)]
+pub struct {{ uc_pascal }}Params {
+    pub name: String,
+}
+
+#[async_trait]
+pub trait {{ uc_pascal }}UseCaseTrait: Send + Sync {
+    async fn execute(&self, params: {{ uc_pascal }}Params) -> Result<{{ pascal }}, {{ pascal }}Error>;
+}

@@ -251,3 +251,86 @@ business/src/
 ```
 
 Integration tests (full project compile + test) live in `crates/cli/src/main.rs` as `#[ignore]` tests run via `make test/full`.
+
+---
+
+## Mocks vs Fakes vs Stubs
+
+| Concept | Definition | When to use |
+|---------|------------|-------------|
+| **Stub** | Returns a hardcoded response; no assertions on calls | Isolating a happy-path test where the collaborator's response is irrelevant |
+| **Mock** | Records calls; has programmable expectations (`mockall`) | Verifying a collaborator was called with specific args, or testing error paths returned by a dependency |
+| **Fake** | Lightweight working implementation (e.g. `InMemoryRepository`) | Integration tests across layers where you want real behaviour without a DB |
+
+**Rule of thumb:** stubs for happy paths, mocks for error paths and interaction assertions, fakes for integration tests. Never mock what you own (domain models).
+
+---
+
+## `fake` Crate for Random Test Data
+
+Add to `business/Cargo.toml`:
+
+```toml
+[dev-dependencies]
+fake = "2"
+```
+
+Use in Object Mothers to generate realistic random data instead of hardcoded strings:
+
+```rust
+use fake::{Fake, faker::name::en::Name as FakeName, faker::lorem::en::Word};
+
+impl ProductMother {
+    pub fn random() -> Product {
+        Self::new()
+            .with_name(&FakeName().fake::<String>())
+            .with_sku(&Word().fake::<String>())
+            .build()
+    }
+}
+```
+
+Random data catches bugs that hardcoded `"test"` strings hide — trimming edge cases, length constraints, encoding issues.
+
+---
+
+## Custom Fakers for Value Objects
+
+Implement `fake::Dummy` on value objects to integrate them into the fake ecosystem:
+
+```rust
+use fake::{Dummy, Faker, faker::name::en::Name as FakeName};
+use rand::Rng;
+
+impl Dummy<Faker> for Name {
+    fn dummy_with_rng<R: Rng + ?Sized>(_: &Faker, rng: &mut R) -> Self {
+        let value: String = FakeName().fake_with_rng(rng);
+        Name::new(value).expect("fake Name must be valid")
+    }
+}
+
+// Usage in Object Mother
+let name: Name = Faker.fake();
+```
+
+---
+
+## Test Constants
+
+Name important boundary values as constants rather than scattering magic literals:
+
+```rust
+#[cfg(test)]
+pub mod constants {
+    pub const VALID_NAME: &str = "Alice";
+    pub const EMPTY: &str = "";
+    pub const VALID_UUID_STR: &str = "550e8400-e29b-41d4-a716-446655440000";
+}
+```
+
+```rust
+use crate::tests::constants::{VALID_NAME, EMPTY};
+
+let result = use_case.execute(Params { name: EMPTY.into() }).await;
+assert!(result.is_err());
+```

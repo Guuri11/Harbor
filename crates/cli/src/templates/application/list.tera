@@ -1,0 +1,86 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::domain::{{ snake }}::{
+    errors::{{ pascal }}Error,
+    model::{{ pascal }},
+    repository::{{ pascal }}RepositoryTrait,
+    use_cases::list_{{ snake }}::{List{{ pascal }}Params, List{{ pascal }}UseCaseTrait},
+};
+use crate::domain::logger::LoggerTrait;
+
+pub struct List{{ pascal }}UseCaseImpl {
+    pub repository: Arc<dyn {{ pascal }}RepositoryTrait>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[async_trait]
+impl List{{ pascal }}UseCaseTrait for List{{ pascal }}UseCaseImpl {
+    async fn execute(&self, _params: List{{ pascal }}Params) -> Result<Vec<{{ pascal }}>, {{ pascal }}Error> {
+        self.logger.info("Listing {{ snake }}s");
+        self.repository.find_all().await.map_err(|e| {
+            self.logger.error(&e.to_string());
+            e
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{{ snake }}::{
+        model::{{ "{" }}{{ pascal }}, {{ pascal }}Props},
+        repository::mocks::Mock{{ pascal }}Repository,
+    };
+    use crate::domain::logger::mocks::MockLogger;
+{{ test_vo_imports }}
+    fn silent_logger() -> MockLogger {
+        let mut mock = MockLogger::new();
+        mock.expect_info().returning(|_| ());
+        mock.expect_warn().returning(|_| ());
+        mock.expect_error().returning(|_| ());
+        mock.expect_debug().returning(|_| ());
+        mock
+    }
+
+    #[tokio::test]
+    async fn should_return_all_{{ snake }}s() {
+        let entities = vec![
+            {{ pascal }}::new({{ pascal }}Props {
+{{ first_props }}
+        }).unwrap(),
+            {{ pascal }}::new({{ pascal }}Props {
+{{ second_props }}
+        }).unwrap(),
+        ];
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo
+            .expect_find_all()
+            .returning(move || Ok(entities.clone()));
+        let use_case = List{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        let result = use_case.execute(List{{ pascal }}Params).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn should_return_empty_list_when_no_{{ snake }}s_exist() {
+        let mut mock_repo = Mock{{ pascal }}Repository::new();
+        mock_repo.expect_find_all().returning(|| Ok(vec![]));
+        let use_case = List{{ pascal }}UseCaseImpl {
+            repository: Arc::new(mock_repo),
+            logger: Arc::new(silent_logger()),
+        };
+
+        let result = use_case.execute(List{{ pascal }}Params).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+}

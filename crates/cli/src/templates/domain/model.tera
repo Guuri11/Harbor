@@ -1,0 +1,45 @@
+use chrono::{DateTime, Utc};
+use uuid::Uuid;{{ extra_imports }}
+
+use super::errors::{{ pascal }}Error;
+
+#[derive(Debug, Clone)]
+pub struct {{ pascal }}Props {
+{{ props_str }}
+}
+
+#[derive(Debug, Clone)]
+pub struct {{ pascal }} {
+{{ entity_str }}
+}
+
+impl {{ pascal }} {
+    pub fn new(props: {{ pascal }}Props) -> Result<Self, {{ pascal }}Error> {
+{{ validations_str }}        let now = chrono::Utc::now();
+        Ok(Self {
+            id: Uuid::new_v4(),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            deleted_at: None,
+{{ new_assignments_str }}
+        })
+    }
+
+    pub fn from_repository(data: {{ pascal }}) -> Self {
+        data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn {{ valid_test_name }}() {
+        let result = {{ pascal }}::new({{ pascal }}Props {
+{{ valid_props_str }}
+        });{{ valid_assertion }}
+    }
+{{ validation_tests_str }}
+}

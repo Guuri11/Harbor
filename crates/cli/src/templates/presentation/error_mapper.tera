@@ -1,0 +1,25 @@
+use business::domain::{{ snake }}::errors::{{ pascal }}Error;
+use poem::http::StatusCode;
+use poem_openapi::payload::Json;
+
+use crate::api::error::{ErrorResponse, IntoErrorResponse};
+
+impl IntoErrorResponse for {{ pascal }}Error {
+    fn into_error_response(self) -> (StatusCode, Json<ErrorResponse>) {
+        let (status, message) = match &self {
+            {{ pascal }}Error::ValidationError(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            {{ pascal }}Error::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            {{ pascal }}Error::Duplicate => (StatusCode::CONFLICT, self.to_string()),
+            {{ pascal }}Error::RepositoryError => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            {{ pascal }}Error::Unknown => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),{{ vo_arms_str }}
+        };
+
+        (
+            status,
+            Json(ErrorResponse {
+                name: "{{ snake }}_error".into(),
+                message,
+            }),
+        )
+    }
+}

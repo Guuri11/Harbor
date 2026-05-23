@@ -1,0 +1,130 @@
+use std::sync::Arc;
+
+use business::{
+    application::{{ snake }}::{
+        create_{{ snake }}::Create{{ pascal }}UseCaseImpl,
+        delete_{{ snake }}::Delete{{ pascal }}UseCaseImpl,
+        get_{{ snake }}::Get{{ pascal }}UseCaseImpl,
+        list_{{ snake }}::List{{ pascal }}UseCaseImpl,
+        update_{{ snake }}::Update{{ pascal }}UseCaseImpl,
+    },
+    domain::{
+        {{ snake }}::use_cases::{
+            create_{{ snake }}::{Create{{ pascal }}Params, Create{{ pascal }}UseCaseTrait},
+            delete_{{ snake }}::{Delete{{ pascal }}Params, Delete{{ pascal }}UseCaseTrait},
+            get_{{ snake }}::{Get{{ pascal }}Params, Get{{ pascal }}UseCaseTrait},
+            list_{{ snake }}::{List{{ pascal }}Params, List{{ pascal }}UseCaseTrait},
+            update_{{ snake }}::{Update{{ pascal }}Params, Update{{ pascal }}UseCaseTrait},
+        },
+        logger::LoggerTrait,
+    },
+};
+use poem_openapi::{OpenApi, param::Path, payload::Json};
+use uuid::Uuid;
+
+use crate::api::error::IntoErrorResponse;
+use crate::api::tags::ApiTags;
+use crate::api::{{ snake }}::dto::{Create{{ pascal }}Request, Update{{ pascal }}Request, {{ pascal }}Dto};
+use crate::api::{{ snake }}::responses::{
+    Create{{ pascal }}Response, Delete{{ pascal }}Response, Get{{ pascal }}Response, List{{ pascal }}Response,
+    Update{{ pascal }}Response,
+};
+
+pub struct {{ pascal }}Api {
+    pub create_{{ snake }}: Arc<Create{{ pascal }}UseCaseImpl>,
+    pub get_{{ snake }}: Arc<Get{{ pascal }}UseCaseImpl>,
+    pub list_{{ snake }}: Arc<List{{ pascal }}UseCaseImpl>,
+    pub update_{{ snake }}: Arc<Update{{ pascal }}UseCaseImpl>,
+    pub delete_{{ snake }}: Arc<Delete{{ pascal }}UseCaseImpl>,
+    pub logger: Arc<dyn LoggerTrait>,
+}
+
+#[OpenApi]
+impl {{ pascal }}Api {
+    /// Create a new {{ pascal }}
+    #[oai(path = "/{{ snake }}s", method = "post", tag = "ApiTags::{{ pascal }}")]
+    async fn create(&self, body: Json<Create{{ pascal }}Request>) -> Create{{ pascal }}Response {
+        match self
+            .create_{{ snake }}
+            .execute(Create{{ pascal }}Params {
+{{ create_params_str }}
+            })
+            .await
+        {
+            Ok(entity) => Create{{ pascal }}Response::Created(Json({{ pascal }}Dto::from_domain(&entity))),
+            Err(err) => {
+                let (status, error) = err.into_error_response();
+                self.logger.warn(&format!("create_{{ snake }} error: {}", error.0.message));
+                Create{{ pascal }}Response::from_status(status, error)
+            }
+        }
+    }
+
+    /// Get a {{ pascal }} by ID
+    #[oai(path = "/{{ snake }}s/:id", method = "get", tag = "ApiTags::{{ pascal }}")]
+    async fn get_by_id(&self, id: Path<Uuid>) -> Get{{ pascal }}Response {
+        match self
+            .get_{{ snake }}
+            .execute(Get{{ pascal }}Params { id: id.0 })
+            .await
+        {
+            Ok(entity) => Get{{ pascal }}Response::Ok(Json({{ pascal }}Dto::from_domain(&entity))),
+            Err(err) => {
+                let (status, error) = err.into_error_response();
+                self.logger.warn(&format!("get_{{ snake }} error: {}", error.0.message));
+                Get{{ pascal }}Response::from_status(status, error)
+            }
+        }
+    }
+
+    /// List all {{ pascal }}s
+    #[oai(path = "/{{ snake }}s", method = "get", tag = "ApiTags::{{ pascal }}")]
+    async fn list(&self) -> List{{ pascal }}Response {
+        match self.list_{{ snake }}.execute(List{{ pascal }}Params).await {
+            Ok(entities) => {
+                List{{ pascal }}Response::Ok(Json(entities.iter().map({{ pascal }}Dto::from_domain).collect()))
+            }
+            Err(err) => {
+                let (status, error) = err.into_error_response();
+                self.logger.error(&format!("list_{{ snake }} error: {}", error.0.message));
+                List{{ pascal }}Response::from_status(status, error)
+            }
+        }
+    }
+
+    /// Update a {{ pascal }}
+    #[oai(path = "/{{ snake }}s/:id", method = "put", tag = "ApiTags::{{ pascal }}")]
+    async fn update(&self, id: Path<Uuid>, body: Json<Update{{ pascal }}Request>) -> Update{{ pascal }}Response {
+        match self
+            .update_{{ snake }}
+            .execute(Update{{ pascal }}Params {
+{{ update_params_str }}
+            })
+            .await
+        {
+            Ok(entity) => Update{{ pascal }}Response::Ok(Json({{ pascal }}Dto::from_domain(&entity))),
+            Err(err) => {
+                let (status, error) = err.into_error_response();
+                self.logger.warn(&format!("update_{{ snake }} error: {}", error.0.message));
+                Update{{ pascal }}Response::from_status(status, error)
+            }
+        }
+    }
+
+    /// Delete a {{ pascal }}
+    #[oai(path = "/{{ snake }}s/:id", method = "delete", tag = "ApiTags::{{ pascal }}")]
+    async fn delete(&self, id: Path<Uuid>) -> Delete{{ pascal }}Response {
+        match self
+            .delete_{{ snake }}
+            .execute(Delete{{ pascal }}Params { id: id.0 })
+            .await
+        {
+            Ok(()) => Delete{{ pascal }}Response::NoContent,
+            Err(err) => {
+                let (status, error) = err.into_error_response();
+                self.logger.warn(&format!("delete_{{ snake }} error: {}", error.0.message));
+                Delete{{ pascal }}Response::from_status(status, error)
+            }
+        }
+    }
+}

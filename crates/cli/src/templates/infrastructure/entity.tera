@@ -1,0 +1,44 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use uuid::Uuid;{{ vo_imports_str }}
+
+use business::domain::{{ snake }}::{errors::{{ pascal }}Error, model::{{ pascal }}};
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct {{ pascal }}Db {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted: bool,
+    pub deleted_at: Option<DateTime<Utc>>,
+{{ struct_fields_str }}
+}
+
+impl TryFrom<{{ pascal }}Db> for {{ pascal }} {
+    type Error = {{ pascal }}Error;
+
+    fn try_from(row: {{ pascal }}Db) -> Result<Self, Self::Error> {
+        Ok(Self::from_repository({{ pascal }} {
+            id: row.id,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            deleted: row.deleted,
+            deleted_at: row.deleted_at,
+{{ try_from_fields_str }}
+        }))
+    }
+}
+
+impl From<&{{ pascal }}> for {{ pascal }}Db {
+    fn from(entity: &{{ pascal }}) -> Self {
+        Self {
+            id: entity.id,
+            created_at: entity.created_at,
+            updated_at: entity.updated_at,
+            deleted: entity.deleted,
+            deleted_at: entity.deleted_at,
+{{ from_fields_str }}
+        }
+    }
+}
