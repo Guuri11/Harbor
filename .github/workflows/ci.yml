@@ -36,3 +36,25 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+  # The gate `.claude/rules/release.md` calls "the most important" one: generates real projects,
+  # scaffolds into them and compiles + tests the result. It used to run only on tag push, which is
+  # how three bugs that produced non-compiling projects reached main. Separate job so the fast
+  # feedback loop above is not slowed down by it.
+  test-full:
+    name: Compile matrix (generated projects)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Generate, compile and test projects
+        run: make test/full

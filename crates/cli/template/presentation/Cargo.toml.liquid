@@ -11,8 +11,12 @@ path = "src/main.rs"
 business = { path = "../business" }
 infrastructure = { path = "../infrastructure" }
 poem = "3"
-poem-openapi = { version = "5", features = ["swagger-ui", "uuid"] }
+# `chrono` feature: without it poem-openapi has no `Type` impl for DateTime<Utc>, so any entity
+# with a date field fails to derive `Object`.
+poem-openapi = { version = "5", features = ["swagger-ui", "uuid", "chrono"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 uuid = { version = "1", features = ["v4"] }
+# DTOs mirror the domain's field types, so any entity with a DateTime<Utc> field needs chrono here.
+chrono = { version = "0.4", features = ["serde"] }

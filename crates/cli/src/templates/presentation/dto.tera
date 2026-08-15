@@ -1,6 +1,6 @@
 use business::domain::{{ snake }}::model::{{ pascal }};
 use poem_openapi::Object;
-use uuid::Uuid;
+use uuid::Uuid;{{ extra_imports }}
 
 #[derive(Debug, Object)]
 #[oai(rename_all = "camelCase")]

@@ -334,11 +334,25 @@ pub fn create_table_sql(snake: &str, fields: &[Field]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!(
-        "CREATE TABLE {snake}s (\n    id UUID PRIMARY KEY,\n{custom_cols}\n    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n    deleted BOOLEAN NOT NULL DEFAULT FALSE,\n    deleted_at TIMESTAMPTZ\n);\n",
-        snake = snake,
-        custom_cols = custom_cols,
-    )
+    let table = format!("{snake}s");
+    let mut sql = format!(
+        "CREATE TABLE {table} (\n    id UUID PRIMARY KEY,\n{custom_cols}\n    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n    deleted BOOLEAN NOT NULL DEFAULT FALSE,\n    deleted_at TIMESTAMPTZ\n);\n",
+    );
+
+    // `unique = true` (the `!` suffix in the CLI) is documented as producing a DB constraint but
+    // used to stop at puerto.toml. A named index rather than an inline `UNIQUE` on the column:
+    // the column definitions stay uniform, and a later migration can drop the constraint by a
+    // name it can predict.
+    let unique_indexes: String = eff
+        .iter()
+        .filter(|f| f.unique)
+        .map(|f| {
+            let name = &f.name;
+            format!("\nCREATE UNIQUE INDEX {table}_{name}_key ON {table} ({name});\n")
+        })
+        .collect();
+    sql.push_str(&unique_indexes);
+    sql
 }
 
 pub fn write_repository_files(

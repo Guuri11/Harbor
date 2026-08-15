@@ -241,14 +241,17 @@ Tests live inside each file in `#[cfg(test)] mod tests { ... }`.
 
 **Adapters for external systems. No business logic.**
 
-### InMemory (default — `puerto generate scaffold <Name>`)
+Which of the two is generated is inferred from `[project] db` in puerto.toml — set once by
+`puerto new --db`. `generate scaffold` has no `--db` flag of its own.
+
+### InMemory (default — `db` absent or false)
 
 ```
 infrastructure/src/<entity>/
   repository.rs    # InMemory<Entity>Repository — implements domain repository trait
 ```
 
-### SQLx/Postgres (`puerto generate scaffold <Name> --db`)
+### SQLx/Postgres (`db = true`)
 
 ```
 infrastructure/src/<entity>/

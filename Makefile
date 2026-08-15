@@ -36,9 +36,9 @@ test: ## Fast structural tests
 	@echo "${YELLOW}Running structural tests...${NC}"
 	$(CARGO) nextest run --workspace
 
-test/full: ## Slow test: generates a real project, compiles it, runs its internal tests
-	@echo "${YELLOW}Running full integration tests (~20s)...${NC}"
-	$(CARGO) nextest run --workspace --run-ignored all
+test/full: ## Slow test: generates real projects, compiles them, runs their internal tests
+	@echo "${YELLOW}Running compile matrix (generates + compiles + tests real projects)...${NC}"
+	$(CARGO) nextest run --workspace --run-ignored all --test-threads 3
 
 lint: ## Run clippy with -D warnings
 	@echo "${CYAN}Linting code...${NC}"

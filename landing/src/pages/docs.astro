@@ -115,6 +115,21 @@ import BaseLayout from '@/layouts/BaseLayout.astro';
             <div class="flex gap-2"><span class="text-puerto-indigo font-mono">infrastructure/</span><span>repository (InMemory or Pg — inferred from puerto.toml)</span></div>
             <div class="flex gap-2"><span class="text-puerto-rust font-mono">presentation/</span><span>routes.rs, dto.rs, responses.rs, error_mapper.rs</span></div>
           </div>
+
+          <p class="mt-6 font-sans text-sm font-semibold text-puerto-ice">Running it twice:</p>
+          <p class="mt-2 font-sans text-sm text-puerto-mist">
+            Scaffolding an entity that already exists is <span class="font-semibold text-puerto-ice">refused</span> — those ~15 files are yours once written, and overwriting them silently would discard any business rule, custom use case body or test you added. In a terminal Puerto lists the files and asks; in CI it aborts without writing a byte.
+          </p>
+          <div class="code-block mt-3 flex items-center gap-3 rounded-md border border-puerto-steel/40 border-l-4 border-l-puerto-rust bg-puerto-navy px-5 py-4">
+            <span class="font-mono text-sm text-puerto-teal select-none">$</span>
+            <code class="font-mono text-sm text-puerto-ice">puerto generate scaffold User --force</code>
+            <button class="copy-btn ml-auto cursor-pointer text-puerto-mist hover:text-puerto-ice" data-copy="puerto generate scaffold User --force" aria-label="Copy">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+            </button>
+          </div>
+          <p class="mt-3 font-sans text-sm text-puerto-mist">
+            <code class="font-mono text-xs text-puerto-rust">--force</code> overwrites them and updates the <code class="font-mono text-xs text-puerto-rust">[[entity]]</code> block in place, so the manifest keeps describing the code on disk. Use cases you added with <code class="font-mono text-xs text-puerto-ice">puerto generate use-case</code> survive; edits inside the regenerated files do not.
+          </p>
         </section>
 
         <!-- Entity Fields -->

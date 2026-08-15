@@ -23,7 +23,9 @@ struct BootstrapEntity {
     needs_repo_var: bool,
     repo_var_line: String,
     use_cases: Vec<BootstrapUseCase>,
-    use_case_fields: String,
+    /// The full `EntityApi { … }` field list, logger included. Built here rather than joined in the
+    /// template so an entity with no use cases cannot emit `EntityApi { , logger: … }`.
+    api_struct_fields: String,
     api_var: String,
 }
 
@@ -111,7 +113,14 @@ fn build_context(entities: &[crate::puerto_toml::Entity]) -> tera::Context {
                 ),
                 repo_impl_import: format!("use {repo_crate_path};"),
                 api_import: format!("use crate::api::{snake}::routes::{pascal}Api;"),
-                use_case_fields: entity.use_cases.join(", "),
+                api_struct_fields: if entity.use_cases.is_empty() {
+                    "logger: Arc::clone(&logger)".to_string()
+                } else {
+                    format!(
+                        "{}, logger: Arc::clone(&logger)",
+                        entity.use_cases.join(", ")
+                    )
+                },
                 api_var: format!("{snake}_api"),
                 pascal: pascal.clone(),
                 snake,
@@ -142,10 +151,46 @@ pub fn generate_tags_content(entities: &[crate::puerto_toml::Entity]) -> String 
     render("bootstrap/tags.tera", &ctx).expect("bootstrap/tags.tera render failed")
 }
 
+/// `puerto generate bootstrap` — refuses when the manifest describes code that is not on disk.
+///
+/// The write itself is unconditional in `regenerate_bootstrap()` (scaffold calls it right after
+/// writing the very files in question). The refusal belongs to the standalone command, which is
+/// the one a user runs against a manifest they hand-edited.
+pub fn run_bootstrap_command(
+    base: &Path,
+    allow_missing: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !allow_missing {
+        let config = crate::puerto_toml::read(base)?;
+        let drifts = crate::generators::consistency::missing_entity_files(base, &config);
+        if !drifts.is_empty() {
+            let lines = crate::generators::consistency::drift_lines(&drifts);
+            return Err(format!(
+                "refusing to write a bootstrap.rs that will not compile:\n  {}\n\nPass \
+                 --allow-missing to write it anyway.",
+                lines.join("\n  ")
+            )
+            .into());
+        }
+    }
+    regenerate_bootstrap(base)?;
+    println!("✓ bootstrap.rs regenerated.");
+    Ok(())
+}
+
 /// Read puerto.toml and overwrite `presentation/src/generated/bootstrap.rs`
 /// and `presentation/src/api/tags.rs`.
+///
+/// Warns — rather than refuses — on manifest/filesystem drift: this runs inside `scaffold`, where
+/// the entity being generated is fine and it is some *other* declared entity that is missing.
 pub fn regenerate_bootstrap(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::puerto_toml::read(base)?;
+
+    for line in crate::generators::consistency::drift_lines(
+        &crate::generators::consistency::missing_entity_files(base, &config),
+    ) {
+        eprintln!("⚠ {line}");
+    }
 
     let bootstrap_path = base.join("presentation/src/generated/bootstrap.rs");
     if let Some(parent) = bootstrap_path.parent() {

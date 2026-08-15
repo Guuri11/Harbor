@@ -32,7 +32,8 @@ If the spec is missing any of these, write them before proceeding.
 
 #### 2. Write Failing Tests — RED
 
-Tests for Puerto CLI live in `crates/cli/src/main.rs` as `#[test]` functions.
+Tests for Puerto CLI live in `crates/cli/src/tests.rs` as `#[test]` functions (declared from
+`main.rs` as `#[cfg(test)] mod tests;`).
 
 Structural tests (file existence, content assertions):
 
@@ -57,8 +58,12 @@ Write the minimum code to make tests pass. No speculative features.
 
 Key files:
 
-- `crates/cli/src/scaffold.rs` — file writers, patchers, bootstrap generator
-- `crates/cli/src/puerto_toml.rs` — puerto.toml I/O
+- `crates/cli/src/generators/` — file writers and per-layer generators (`domain.rs`, `application.rs`,
+  `infrastructure.rs`, `presentation.rs`, `scaffold.rs`, `bootstrap.rs`)
+- `crates/cli/src/templates/` — the `.tera` templates the generators render
+- `crates/cli/src/patchers/` — `lib.rs` / `api.rs` patchers
+- `crates/cli/src/puerto_toml.rs` — puerto.toml I/O + CLI field parsing
+- `crates/cli/src/validation.rs` — name predicates shared by the parser and `puerto validate`
 - `crates/cli/src/main.rs` — CLI dispatch
 
 #### 4. Refactor
@@ -184,12 +189,17 @@ make format
 
 ### Puerto CLI
 
-| File                            | Purpose                                            |
-| ------------------------------- | -------------------------------------------------- |
-| `crates/cli/src/main.rs`        | CLI definition + test suite                        |
-| `crates/cli/src/scaffold.rs`    | File writers, lib.rs patchers, bootstrap generator |
-| `crates/cli/src/puerto_toml.rs` | puerto.toml read/write/add_entity                  |
-| `crates/template/basic/`        | Project template                                   |
+| File                                     | Purpose                                                     |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| `crates/cli/src/main.rs`                 | CLI definition + dispatch                                   |
+| `crates/cli/src/tests.rs`                | Test suite (structural + `#[ignore]` compile matrix)        |
+| `crates/cli/src/generators/`             | Per-layer generators, bootstrap, overwrite/drift guards     |
+| `crates/cli/src/templates/`              | `.tera` templates rendered by the generators                |
+| `crates/cli/src/patchers/`               | `lib.rs` / `api.rs` patchers                                |
+| `crates/cli/src/puerto_toml.rs`          | puerto.toml read/write/add_entity + `parse_field_arg`       |
+| `crates/cli/src/validation.rs`           | Name predicates shared by the parser and `puerto validate`  |
+| `crates/cli/src/scaffold.rs`             | Re-export façade over `generators/` (15 lines)              |
+| `crates/cli/template/`                   | Project template used by `puerto new`                       |
 
 ### Generated Projects
 

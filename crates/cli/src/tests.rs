@@ -1,10 +1,10 @@
 use crate::commands::list::{require_puerto_project, run_list};
 use crate::commands::new::extract_template;
 use crate::commands::validate;
+use crate::generators::conflict::OverwritePolicy;
 use crate::puerto_toml::ValueObjectDefinition;
 use crate::{puerto_toml, scaffold, snippets};
 use cargo_generate::{GenerateArgs, TemplatePath, Vcs, generate};
-use serde_json;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,32 @@ fn generate_project(name: &str, destination: &Path) -> Result<PathBuf, Box<dyn s
     let output_dir = generate(args)?;
     drop(tmp);
     Ok(output_dir)
+}
+
+// ── CLI surface ───────────────────────────────────────────────────────────
+
+#[test]
+fn cli_supports_version_flag() {
+    // `puerto --version` is the first command the install docs tell a user to run. Without
+    // `version` on `#[command(...)]` clap never generates the flag, and it exits 2 with
+    // "unexpected argument '--version' found".
+    use clap::CommandFactory;
+
+    let version = crate::Cli::command().get_version().map(str::to_string);
+    assert_eq!(version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+
+    let err = crate::Cli::command()
+        .try_get_matches_from(["puerto", "--version"])
+        .expect_err("--version short-circuits parsing");
+    assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+}
+
+#[test]
+fn cli_definition_is_well_formed() {
+    // Catches conflicting flags, duplicate short options and broken `raw = true` args at test
+    // time rather than at the first invocation.
+    use clap::CommandFactory;
+    crate::Cli::command().debug_assert();
 }
 
 // ── puerto new (non-interactive / flag-driven) ────────────────────────────
@@ -1438,7 +1464,7 @@ fn generate_domain_creates_domain_files_and_mother() {
     fs::create_dir_all(&dir).unwrap();
     let output = generate_project("myapp", &dir).unwrap();
 
-    scaffold::run_generate_domain("Widget", &output).unwrap();
+    scaffold::run_generate_domain("Widget", &output, &[]).unwrap();
 
     assert!(output.join("business/src/domain/widget/model.rs").exists());
     assert!(output.join("business/src/domain/widget/errors.rs").exists());
@@ -1473,6 +1499,87 @@ fn generate_domain_creates_domain_files_and_mother() {
     cleanup(&dir);
 }
 
+// ── T-06: `generate domain` accepts typed fields ──────────────────────────
+
+#[test]
+fn generate_domain_writes_cli_fields_into_model_and_manifest() {
+    let dir = temp_dir("gen_domain_fields");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("myapp", &dir).unwrap();
+
+    let fields = vec![
+        puerto_toml::parse_field_arg("amount:i64").unwrap(),
+        puerto_toml::parse_field_arg("status:Status:enum:Draft/Paid").unwrap(),
+    ];
+    scaffold::run_generate_domain("Invoice", &output, &fields).unwrap();
+
+    let model = fs::read_to_string(output.join("business/src/domain/invoice/model.rs")).unwrap();
+    assert!(model.contains("pub amount: i64"), "got:\n{model}");
+    assert!(model.contains("pub status: Status"), "got:\n{model}");
+
+    // The manifest is what makes the *later* layered commands field-aware.
+    let config = puerto_toml::read(&output).unwrap();
+    let invoice = config
+        .entity
+        .iter()
+        .find(|e| e.name == "Invoice")
+        .expect("Invoice in puerto.toml");
+    let names: Vec<&str> = invoice.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["amount", "status"]);
+
+    cleanup(&dir);
+}
+
+#[test]
+fn generate_domain_fields_reach_the_later_layers() {
+    // The whole point of persisting fields in `generate domain`: application, repository and
+    // presentation all read them back from puerto.toml. They used to be written as `vec![]`, so
+    // the entire domain-first workflow could only ever produce the default `name: String`.
+    let dir = temp_dir("gen_domain_fields_layers");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("myapp", &dir).unwrap();
+
+    let fields = vec![puerto_toml::parse_field_arg("amount:i64").unwrap()];
+    scaffold::run_generate_domain("Invoice", &output, &fields).unwrap();
+    scaffold::run_generate_application("Invoice", &output).unwrap();
+    scaffold::run_generate_repository("Invoice", &output, None).unwrap();
+    scaffold::run_generate_presentation("Invoice", &output).unwrap();
+
+    let impl_rs =
+        fs::read_to_string(output.join("business/src/application/invoice/create_invoice.rs"))
+            .unwrap();
+    assert!(impl_rs.contains("amount"), "got:\n{impl_rs}");
+
+    let dto = fs::read_to_string(output.join("presentation/src/api/invoice/dto.rs")).unwrap();
+    assert!(dto.contains("pub amount: i64"), "got:\n{dto}");
+
+    cleanup(&dir);
+}
+
+#[test]
+fn generate_domain_rejects_conflicting_value_object_types() {
+    let dir = temp_dir("gen_domain_vo_conflict");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("myapp", &dir).unwrap();
+
+    let fields = vec![
+        puerto_toml::parse_field_arg("a:Code:String").unwrap(),
+        puerto_toml::parse_field_arg("b:Code:i64").unwrap(),
+    ];
+    let result = scaffold::run_generate_domain("Invoice", &output, &fields);
+
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("Code"),
+        "error should name the conflicting value object"
+    );
+
+    cleanup(&dir);
+}
+
 #[test]
 fn generate_application_creates_use_case_impls() {
     let dir = temp_dir("gen_application");
@@ -1480,7 +1587,7 @@ fn generate_application_creates_use_case_impls() {
     fs::create_dir_all(&dir).unwrap();
     let output = generate_project("myapp", &dir).unwrap();
 
-    scaffold::run_generate_domain("Widget", &output).unwrap();
+    scaffold::run_generate_domain("Widget", &output, &[]).unwrap();
     scaffold::run_generate_application("Widget", &output).unwrap();
 
     assert!(
@@ -1541,7 +1648,7 @@ fn generate_repository_creates_infra_files() {
     fs::create_dir_all(&dir).unwrap();
     let output = generate_project("myapp", &dir).unwrap();
 
-    scaffold::run_generate_domain("Widget", &output).unwrap();
+    scaffold::run_generate_domain("Widget", &output, &[]).unwrap();
     scaffold::run_generate_repository("Widget", &output, None).unwrap();
 
     assert!(
@@ -1562,7 +1669,7 @@ fn generate_presentation_creates_all_files_and_regenerates_bootstrap() {
     fs::create_dir_all(&dir).unwrap();
     let output = generate_project("myapp", &dir).unwrap();
 
-    scaffold::run_generate_domain("Widget", &output).unwrap();
+    scaffold::run_generate_domain("Widget", &output, &[]).unwrap();
     scaffold::run_generate_repository("Widget", &output, None).unwrap();
     scaffold::run_generate_presentation("Widget", &output).unwrap();
 
@@ -1821,7 +1928,7 @@ fn no_demo_then_scaffold_generates_new_entity() {
 
     let output = new_project_non_interactive(Some("no-demo-app".into()), false, &dir).unwrap();
     scaffold::apply_no_demo(&output).unwrap();
-    scaffold::run_scaffold("Player", &output, None, &[]).unwrap();
+    scaffold::run_scaffold("Player", &output, None, &[], OverwritePolicy::Ask).unwrap();
 
     assert!(output.join("business/src/domain/player/model.rs").exists());
     assert!(
@@ -1867,7 +1974,7 @@ fn scaffold_7_4_infers_db_from_project_toml() {
     fs::create_dir_all(&dir).unwrap();
     setup_puerto_stubs_with_project_db(&dir);
     fs::create_dir_all(dir.join("infrastructure/migrations")).unwrap();
-    scaffold::run_scaffold("Team", &dir, Some("/bin/true"), &[]).unwrap();
+    scaffold::run_scaffold("Team", &dir, Some("/bin/true"), &[], OverwritePolicy::Ask).unwrap();
 
     let content = fs::read_to_string(dir.join("infrastructure/src/team/repository.rs")).unwrap();
     assert!(content.contains("PgTeamRepository"));
@@ -1882,7 +1989,7 @@ fn scaffold_7_4_non_db_project_uses_inmemory() {
     cleanup(&dir);
     fs::create_dir_all(&dir).unwrap();
     setup_puerto_stubs(&dir);
-    scaffold::run_scaffold("Team", &dir, None, &[]).unwrap();
+    scaffold::run_scaffold("Team", &dir, None, &[], OverwritePolicy::Ask).unwrap();
 
     let content = fs::read_to_string(dir.join("infrastructure/src/team/repository.rs")).unwrap();
     assert!(content.contains("InMemoryTeamRepository"));
@@ -1897,7 +2004,7 @@ fn scaffold_7_4_always_generates_5_use_cases() {
     cleanup(&dir);
     fs::create_dir_all(&dir).unwrap();
     setup_puerto_stubs(&dir);
-    scaffold::run_scaffold("Team", &dir, None, &[]).unwrap();
+    scaffold::run_scaffold("Team", &dir, None, &[], OverwritePolicy::Ask).unwrap();
 
     assert!(
         dir.join("business/src/domain/team/use_cases/create_team.rs")
@@ -1929,7 +2036,7 @@ fn scaffold_7_4_db_project_auto_creates_migration() {
     cleanup(&dir);
     fs::create_dir_all(&dir).unwrap();
     setup_puerto_stubs_with_project_db(&dir);
-    scaffold::run_scaffold("Team", &dir, Some("/bin/true"), &[]).unwrap();
+    scaffold::run_scaffold("Team", &dir, Some("/bin/true"), &[], OverwritePolicy::Ask).unwrap();
 
     assert!(
         dir.join("infrastructure/migrations").is_dir(),
@@ -1945,7 +2052,7 @@ fn scaffold_7_4_non_db_project_does_not_create_migrations_dir() {
     cleanup(&dir);
     fs::create_dir_all(&dir).unwrap();
     setup_puerto_stubs(&dir);
-    scaffold::run_scaffold("Team", &dir, None, &[]).unwrap();
+    scaffold::run_scaffold("Team", &dir, None, &[], OverwritePolicy::Ask).unwrap();
 
     assert!(
         !dir.join("infrastructure/migrations").exists(),
@@ -2984,6 +3091,65 @@ fn create_table_sql_with_custom_fields() {
     assert!(!result.contains("name TEXT"));
 }
 
+// ── T-05: `unique = true` reaches the migration ───────────────────────────
+
+#[test]
+fn create_table_sql_emits_unique_index_for_unique_fields() {
+    use crate::generators::infrastructure::create_table_sql;
+    use crate::puerto_toml::Field;
+
+    let fields = vec![
+        Field {
+            name: "sku".into(),
+            field_type: "String".into(),
+            unique: true,
+            ..Default::default()
+        },
+        Field {
+            name: "price".into(),
+            field_type: "i64".into(),
+            ..Default::default()
+        },
+    ];
+    let result = create_table_sql("product", &fields);
+
+    // The column definition stays uniform; the constraint is a named index so later migrations
+    // can drop or replace it by name.
+    assert!(result.contains("sku TEXT NOT NULL"));
+    assert!(
+        result.contains("CREATE UNIQUE INDEX products_sku_key ON products (sku);"),
+        "unique field must produce a unique index, got:\n{result}"
+    );
+    assert!(!result.contains("price_key"));
+}
+
+#[test]
+fn create_table_sql_emits_unique_index_for_unique_value_object_field() {
+    use crate::generators::infrastructure::create_table_sql;
+    use crate::puerto_toml::Field;
+
+    // `sku:Sku:String!` — the VO wraps the column, the constraint applies to the column.
+    let fields = vec![Field {
+        name: "sku".into(),
+        field_type: "String".into(),
+        unique: true,
+        value_object: Some("Sku".into()),
+        ..Default::default()
+    }];
+    let result = create_table_sql("item", &fields);
+
+    assert!(result.contains("CREATE UNIQUE INDEX items_sku_key ON items (sku);"));
+}
+
+#[test]
+fn create_table_sql_omits_unique_index_when_no_field_is_unique() {
+    use crate::generators::infrastructure::create_table_sql;
+
+    let result = create_table_sql("product", &[]);
+
+    assert!(!result.contains("CREATE UNIQUE INDEX"));
+}
+
 #[test]
 fn generate_crud_infra_db_repository_backward_compat() {
     use crate::generators::infrastructure::generate_crud_infra_db_repository;
@@ -3242,8 +3408,9 @@ fn parse_field_arg_map_shorthand() {
 
 #[test]
 fn parse_field_arg_datetime_shorthand() {
-    let field = puerto_toml::parse_field_arg("created_at:DateTime").unwrap();
-    assert_eq!(field.name, "created_at");
+    // Not `created_at` — that is a system field every entity already has.
+    let field = puerto_toml::parse_field_arg("published_at:DateTime").unwrap();
+    assert_eq!(field.name, "published_at");
     assert_eq!(field.field_type, "DateTime<Utc>");
 }
 
@@ -3357,8 +3524,9 @@ fn parse_field_arg_uuid() {
 
 #[test]
 fn parse_field_arg_uuid_unique() {
-    let field = puerto_toml::parse_field_arg("id:Uuid!").unwrap();
-    assert_eq!(field.name, "id");
+    // Not `id` — that is a system field every entity already has.
+    let field = puerto_toml::parse_field_arg("external_id:Uuid!").unwrap();
+    assert_eq!(field.name, "external_id");
     assert_eq!(field.field_type, "Uuid");
     assert!(field.unique);
 }
@@ -3390,9 +3558,11 @@ fn parse_field_arg_rejects_name_starting_with_digit() {
 }
 
 #[test]
-fn parse_field_arg_accepts_underscore_name() {
-    let field = puerto_toml::parse_field_arg("_private:String").unwrap();
-    assert_eq!(field.name, "_private");
+fn parse_field_arg_rejects_leading_underscore_name() {
+    // A leading `_` was accepted by the predicate while its own error message and the docs both
+    // said "snake_case, not starting with a digit" — and `_private` reads as "deliberately
+    // unused" to every Rust reader.
+    assert!(puerto_toml::parse_field_arg("_private:String").is_err());
 }
 
 #[test]
@@ -4231,4 +4401,805 @@ fn infer_shared_vo_handles_multiple_fields() {
     assert_eq!(result[1].value_object, Some("Money".to_string()));
     assert_eq!(result[2].field_type, "bool");
     assert!(result[2].value_object.is_none());
+}
+
+// ── T-07: compile matrix ──────────────────────────────────────────────────
+//
+// The structural tests above assert on substrings of the generated *text*. Nothing there proves
+// the text is valid Rust — which is how `Option<VO>`/`Vec<VO>` (T-01), `--no-demo` (T-02) and
+// use-case-less entities (T-03) shipped broken. These scenarios generate a real project, scaffold
+// into it, and run `cargo test --workspace` inside it: the only assertion that cannot be fooled.
+//
+// They are `#[ignore]`d (slow) and run via `make test/full`.
+
+/// One end-to-end generation scenario.
+struct Scenario<'a> {
+    /// Temp-dir suffix; must be unique per scenario.
+    name: &'a str,
+    /// Strip the Greeting demo before scaffolding (`puerto new --no-demo`).
+    no_demo: bool,
+    /// Shared VOs declared in puerto.toml before any scaffold (`(name, inner_type)`).
+    shared_vos: &'a [(&'a str, &'a str)],
+    /// Entities to scaffold: `(PascalName, CLI field args)`.
+    entities: &'a [(&'a str, &'a [&'a str])],
+}
+
+/// Generates the project, applies the scenario, and asserts the result compiles **and its tests
+/// pass**. `cargo check` is not enough: T-01 only breaks test targets.
+fn assert_scenario_compiles(scenario: &Scenario) {
+    let dir = scenario_workspace(scenario.name);
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let output = generate_project(&format!("compile-{}", scenario.name), &dir).unwrap();
+
+    if scenario.no_demo {
+        scaffold::apply_no_demo(&output).unwrap();
+    }
+
+    for (vo_name, inner) in scenario.shared_vos {
+        puerto_toml::add_value_object(&output, vo_name, inner).unwrap();
+    }
+
+    let shared_vos = puerto_toml::read(&output).unwrap().value_object;
+
+    for (entity, field_args) in scenario.entities {
+        let parsed: Vec<puerto_toml::Field> = field_args
+            .iter()
+            .map(|arg| puerto_toml::parse_field_arg(arg).unwrap())
+            .collect();
+        let fields = puerto_toml::apply_shared_vo_inference(parsed, &shared_vos);
+        crate::generators::types::validate_fields(&fields).unwrap();
+        scaffold::run_scaffold(
+            entity,
+            &output,
+            Some("/bin/true"),
+            &fields,
+            OverwritePolicy::Ask,
+        )
+        .unwrap();
+    }
+
+    let result = std::process::Command::new("cargo")
+        .args(["test", "--workspace"])
+        // A target dir **per scenario**. They must not share one: every generated project names
+        // its crates `business`/`infrastructure`/`presentation`, so a shared target dir has them
+        // overwrite each other's artifacts and fail for reasons unrelated to the code under test.
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .current_dir(&output)
+        .output()
+        .expect("failed to run cargo test");
+
+    if !result.status.success() {
+        eprintln!("stdout:\n{}", String::from_utf8_lossy(&result.stdout));
+        eprintln!("stderr:\n{}", String::from_utf8_lossy(&result.stderr));
+        panic!(
+            "scenario '{}': generated project failed `cargo test --workspace`",
+            scenario.name
+        );
+    }
+
+    cleanup(&dir);
+}
+
+/// Workspace for one scenario: the generated project plus its cargo target dir.
+///
+/// Lives under Puerto's own `target/`, not `/tmp`: a full build tree per scenario is gigabytes,
+/// and on a tmpfs `/tmp` the matrix hits "Disk quota exceeded" instead of reporting on the code.
+/// `cleanup()` on success keeps the total bounded by how many scenarios run concurrently; a
+/// failing scenario keeps its tree for inspection.
+fn scenario_workspace(scenario: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/compile-matrix")
+        .join(scenario);
+    let _ = fs::create_dir_all(&root);
+    root
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_no_demo_then_scaffold() {
+    assert_scenario_compiles(&Scenario {
+        name: "no_demo",
+        no_demo: true,
+        shared_vos: &[],
+        entities: &[("Persona", &["name:String"])],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_all_primitive_field_types() {
+    assert_scenario_compiles(&Scenario {
+        name: "primitives",
+        no_demo: false,
+        shared_vos: &[],
+        entities: &[(
+            "Product",
+            &[
+                "title:String",
+                "price:i64",
+                "in_stock:bool",
+                "rate:f64",
+                "released_at:DateTime",
+                "meta:map",
+            ],
+        )],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_option_and_vec_primitives() {
+    assert_scenario_compiles(&Scenario {
+        name: "opt_vec_prim",
+        no_demo: false,
+        shared_vos: &[],
+        entities: &[(
+            "Article",
+            &[
+                "title:String",
+                "summary:opt:String",
+                "views:opt:i64",
+                "tags:vec:String",
+                "scores:vec:i64",
+            ],
+        )],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_plain_and_unique_value_objects() {
+    assert_scenario_compiles(&Scenario {
+        name: "plain_vo",
+        no_demo: false,
+        shared_vos: &[],
+        entities: &[(
+            "Item",
+            &["name:Name:String", "sku:Sku:String!", "weight:Weight:i64"],
+        )],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_option_and_vec_value_objects() {
+    assert_scenario_compiles(&Scenario {
+        name: "opt_vec_vo",
+        no_demo: false,
+        shared_vos: &[],
+        entities: &[(
+            "Persona",
+            &[
+                "name:String",
+                "middle_name:MiddleName:opt:String",
+                "tags:Tag:vec:String",
+            ],
+        )],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_enum_value_object() {
+    assert_scenario_compiles(&Scenario {
+        name: "enum_vo",
+        no_demo: false,
+        shared_vos: &[],
+        entities: &[(
+            "Order",
+            &[
+                "reference:String",
+                "status:Status:enum:Pending/Confirmed/Cancelled",
+            ],
+        )],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_shared_value_objects() {
+    assert_scenario_compiles(&Scenario {
+        name: "shared_vo",
+        no_demo: false,
+        shared_vos: &[("Email", "String"), ("Money", "i64")],
+        entities: &[("Customer", &["name:String", "email:Email", "credit:Money"])],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_multiple_entities() {
+    assert_scenario_compiles(&Scenario {
+        name: "multi_entity",
+        no_demo: false,
+        shared_vos: &[],
+        entities: &[
+            ("Product", &["title:String", "price:i64"]),
+            ("Category", &["name:Name:String"]),
+        ],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_every_value_object_kind_at_once() {
+    assert_scenario_compiles(&Scenario {
+        name: "vo_kitchen_sink",
+        no_demo: false,
+        shared_vos: &[("Email", "String")],
+        entities: &[(
+            "Account",
+            &[
+                "title:String",
+                "price:i64",
+                "name:Name:String",
+                "sku:Sku:String!",
+                "note:opt:String",
+                "middle_name:MiddleName:opt:String",
+                "tags:Tag:vec:String",
+                "status:Status:enum:Active/Archived",
+                "email:Email",
+            ],
+        )],
+    });
+}
+
+#[test]
+#[ignore = "slow: compiles and tests a generated project"]
+fn compiles_with_domain_first_layered_flow_and_fields() {
+    // T-06: `generate domain -- fields` persists the fields, so the three later layered commands
+    // read them back from puerto.toml. Before, every one of them was field-blind and this flow
+    // could only ever produce the default `name: String`.
+    let dir = scenario_workspace("layered_fields");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let output = generate_project("compile-layered-fields", &dir).unwrap();
+
+    let fields: Vec<puerto_toml::Field> = [
+        "amount:i64",
+        "reference:Reference:String",
+        "note:opt:String",
+    ]
+    .iter()
+    .map(|arg| puerto_toml::parse_field_arg(arg).unwrap())
+    .collect();
+
+    scaffold::run_generate_domain("Invoice", &output, &fields).unwrap();
+    scaffold::run_generate_application("Invoice", &output).unwrap();
+    scaffold::run_generate_repository("Invoice", &output, Some("/bin/true")).unwrap();
+    scaffold::run_generate_presentation("Invoice", &output).unwrap();
+
+    let result = std::process::Command::new("cargo")
+        .args(["test", "--workspace"])
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .current_dir(&output)
+        .output()
+        .expect("failed to run cargo test");
+
+    if !result.status.success() {
+        eprintln!("stdout:\n{}", String::from_utf8_lossy(&result.stdout));
+        eprintln!("stderr:\n{}", String::from_utf8_lossy(&result.stderr));
+        panic!("domain-first layered flow with fields failed `cargo test --workspace`");
+    }
+
+    cleanup(&dir);
+}
+
+// ── T-03: bootstrap with a use-case-less entity ───────────────────────────
+
+#[test]
+fn bootstrap_with_entity_without_use_cases_is_syntactically_valid() {
+    // An entity can reach puerto.toml with no use cases (hand-edited manifest; `puerto validate`
+    // only warns). Joining an empty use-case list used to emit `EntityApi { , logger: … }`.
+    let entities = vec![puerto_toml::Entity {
+        name: "Invoice".to_string(),
+        use_cases: vec![],
+        db: false,
+        fields: vec![],
+    }];
+
+    let content = crate::generators::bootstrap::generate_bootstrap_content(&entities);
+
+    assert!(!content.contains("{ ,"));
+    assert!(content.contains("let invoice_api = InvoiceApi { logger: Arc::clone(&logger) };"));
+}
+
+#[test]
+fn bootstrap_with_use_cases_still_lists_them_before_logger() {
+    let entities = vec![puerto_toml::Entity {
+        name: "Product".to_string(),
+        use_cases: vec!["create_product".into(), "get_product".into()],
+        db: false,
+        fields: vec![],
+    }];
+
+    let content = crate::generators::bootstrap::generate_bootstrap_content(&entities);
+
+    assert!(content.contains(
+        "let product_api = ProductApi { create_product, get_product, logger: Arc::clone(&logger) };"
+    ));
+}
+
+// ── T-02: --no-demo keeps the tags module ─────────────────────────────────
+
+#[test]
+fn no_demo_keeps_tags_module_declared() {
+    let dir = temp_dir("no_demo_tags");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("no-demo-tags", &dir).unwrap();
+
+    scaffold::apply_no_demo(&output).unwrap();
+
+    let api_rs = fs::read_to_string(output.join("presentation/src/api.rs")).unwrap();
+    assert!(
+        api_rs.contains("pub mod tags;"),
+        "generated routes.rs import crate::api::tags::ApiTags — the declaration must survive \
+         --no-demo. Got:\n{api_rs}"
+    );
+    cleanup(&dir);
+}
+
+#[test]
+fn api_rs_patch_restores_missing_tags_module() {
+    let dir = temp_dir("api_rs_tags_restore");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("tags-restore", &dir).unwrap();
+
+    // Simulate a hand-edited api.rs that lost the declaration.
+    fs::write(output.join("presentation/src/api.rs"), "pub mod error;\n").unwrap();
+    crate::patchers::api_rs::patch_api_rs(&output, "product").unwrap();
+
+    let api_rs = fs::read_to_string(output.join("presentation/src/api.rs")).unwrap();
+    assert!(api_rs.contains("pub mod tags;"));
+    assert!(api_rs.contains("pub mod product;"));
+    cleanup(&dir);
+}
+
+// ── T-04: scaffold does not silently overwrite ────────────────────────────
+
+fn scaffold_test_field(name: &str, ty: &str) -> puerto_toml::Field {
+    puerto_toml::Field {
+        name: name.to_string(),
+        field_type: ty.to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn rescaffold_refuses_to_overwrite_and_writes_nothing() {
+    let dir = temp_dir("rescaffold_refuses");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("rescaffold-refuses", &dir).unwrap();
+
+    scaffold::run_scaffold(
+        "Product",
+        &output,
+        Some("/bin/true"),
+        &[scaffold_test_field("title", "String")],
+        OverwritePolicy::Ask,
+    )
+    .unwrap();
+
+    let model_path = output.join("business/src/domain/product/model.rs");
+    let hand_written = format!(
+        "{}\n// hand-written business rule\n",
+        fs::read_to_string(&model_path).unwrap()
+    );
+    fs::write(&model_path, &hand_written).unwrap();
+
+    // Non-interactive re-scaffold must fail rather than silently discard the edit.
+    let result = scaffold::run_scaffold(
+        "Product",
+        &output,
+        Some("/bin/true"),
+        &[scaffold_test_field("other", "i64")],
+        OverwritePolicy::Ask,
+    );
+
+    assert!(result.is_err(), "re-scaffold should refuse without --force");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("--force"),
+        "error should point at --force: {err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&model_path).unwrap(),
+        hand_written,
+        "no file may be touched when the command is refused"
+    );
+
+    cleanup(&dir);
+}
+
+#[test]
+fn rescaffold_with_force_overwrites_and_syncs_puerto_toml() {
+    let dir = temp_dir("rescaffold_force");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("rescaffold-force", &dir).unwrap();
+
+    scaffold::run_scaffold(
+        "Product",
+        &output,
+        Some("/bin/true"),
+        &[scaffold_test_field("title", "String")],
+        OverwritePolicy::Ask,
+    )
+    .unwrap();
+
+    scaffold::run_scaffold(
+        "Product",
+        &output,
+        Some("/bin/true"),
+        &[scaffold_test_field("headline", "String")],
+        OverwritePolicy::Force,
+    )
+    .unwrap();
+
+    let model = fs::read_to_string(output.join("business/src/domain/product/model.rs")).unwrap();
+    assert!(model.contains("pub headline: String"));
+    assert!(!model.contains("pub title: String"));
+
+    // The manifest must describe the code that is actually on disk.
+    let config = puerto_toml::read(&output).unwrap();
+    let product = config
+        .entity
+        .iter()
+        .find(|e| e.name == "Product")
+        .expect("Product in puerto.toml");
+    let field_names: Vec<&str> = product.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(field_names, vec!["headline"]);
+
+    cleanup(&dir);
+}
+
+#[test]
+fn rescaffold_preserves_use_cases_added_by_generate_use_case() {
+    let dir = temp_dir("rescaffold_keeps_uc");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("rescaffold-keeps-uc", &dir).unwrap();
+
+    scaffold::run_scaffold(
+        "Product",
+        &output,
+        Some("/bin/true"),
+        &[scaffold_test_field("title", "String")],
+        OverwritePolicy::Ask,
+    )
+    .unwrap();
+    scaffold::run_use_case("Product", "archive_product", &output).unwrap();
+
+    scaffold::run_scaffold(
+        "Product",
+        &output,
+        Some("/bin/true"),
+        &[scaffold_test_field("title", "String")],
+        OverwritePolicy::Force,
+    )
+    .unwrap();
+
+    let config = puerto_toml::read(&output).unwrap();
+    let product = config
+        .entity
+        .iter()
+        .find(|e| e.name == "Product")
+        .expect("Product in puerto.toml");
+    assert!(
+        product.use_cases.contains(&"archive_product".to_string()),
+        "a custom use case must survive a re-scaffold: {:?}",
+        product.use_cases
+    );
+
+    cleanup(&dir);
+}
+
+// ── T-08: manifest / filesystem drift ─────────────────────────────────────
+
+/// Declares an extra entity in puerto.toml without generating a single file for it.
+fn declare_phantom_entity(base: &Path, name: &str) {
+    puerto_toml::add_entity(
+        base,
+        name,
+        vec![format!("create_{}", name.to_lowercase())],
+        false,
+        vec![],
+    )
+    .unwrap();
+}
+
+#[test]
+fn validate_fails_on_declared_but_unscaffolded_entity() {
+    let dir = temp_dir("drift_validate");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("drift-validate", &dir).unwrap();
+
+    declare_phantom_entity(&output, "Invoice");
+
+    let result = validate::run_validate(&output);
+
+    assert!(result.is_err(), "a phantom entity must fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invoice") && err.contains("puerto generate scaffold Invoice"),
+        "error should name the entity and the fix: {err}"
+    );
+
+    cleanup(&dir);
+}
+
+#[test]
+fn validate_passes_on_a_freshly_generated_project() {
+    // The demo Greeting entity must satisfy the same consistency pass.
+    let dir = temp_dir("drift_validate_clean");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("drift-clean", &dir).unwrap();
+
+    assert!(validate::run_validate(&output).is_ok());
+
+    cleanup(&dir);
+}
+
+#[test]
+fn validate_warns_but_passes_on_an_undeclared_domain_module() {
+    let dir = temp_dir("drift_orphan");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("drift-orphan", &dir).unwrap();
+
+    fs::create_dir_all(output.join("business/src/domain/ghost")).unwrap();
+
+    // Orphan code compiles — it is simply invisible to Puerto. A warning, not an error.
+    assert!(validate::run_validate(&output).is_ok());
+    let orphans = crate::generators::consistency::orphan_entity_dirs(
+        &output,
+        &puerto_toml::read(&output).unwrap(),
+    );
+    assert_eq!(orphans, vec!["ghost".to_string()]);
+
+    cleanup(&dir);
+}
+
+#[test]
+fn bootstrap_command_refuses_when_declared_code_is_missing() {
+    let dir = temp_dir("drift_bootstrap");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("drift-bootstrap", &dir).unwrap();
+
+    let before =
+        fs::read_to_string(output.join("presentation/src/generated/bootstrap.rs")).unwrap();
+    declare_phantom_entity(&output, "Invoice");
+
+    let result = scaffold::run_bootstrap_command(&output, false);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("--allow-missing"), "got: {err}");
+    assert_eq!(
+        fs::read_to_string(output.join("presentation/src/generated/bootstrap.rs")).unwrap(),
+        before,
+        "a refused command must not have written anything"
+    );
+
+    cleanup(&dir);
+}
+
+#[test]
+fn bootstrap_command_writes_anyway_with_allow_missing() {
+    let dir = temp_dir("drift_bootstrap_allow");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("drift-bootstrap-allow", &dir).unwrap();
+
+    declare_phantom_entity(&output, "Invoice");
+
+    scaffold::run_bootstrap_command(&output, true).unwrap();
+
+    let bootstrap =
+        fs::read_to_string(output.join("presentation/src/generated/bootstrap.rs")).unwrap();
+    assert!(bootstrap.contains("InvoiceApi"));
+
+    cleanup(&dir);
+}
+
+#[test]
+fn scaffolding_the_declared_entity_clears_the_drift() {
+    let dir = temp_dir("drift_cleared");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("drift-cleared", &dir).unwrap();
+
+    declare_phantom_entity(&output, "Invoice");
+    scaffold::run_scaffold(
+        "Invoice",
+        &output,
+        Some("/bin/true"),
+        &[],
+        OverwritePolicy::Ask,
+    )
+    .unwrap();
+
+    assert!(validate::run_validate(&output).is_ok());
+    assert!(scaffold::run_bootstrap_command(&output, false).is_ok());
+
+    cleanup(&dir);
+}
+
+// ── T-12: name validation gaps ────────────────────────────────────────────
+
+#[test]
+fn parse_field_arg_rejects_system_field_names() {
+    for name in crate::validation::SYSTEM_FIELDS {
+        let arg = format!("{name}:String");
+        let result = puerto_toml::parse_field_arg(&arg);
+        assert!(result.is_err(), "'{arg}' must be rejected");
+        assert!(result.unwrap_err().contains("reserved"));
+    }
+}
+
+#[test]
+fn parse_field_arg_rejects_rust_keyword_field_names() {
+    let result = puerto_toml::parse_field_arg("type:String");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Rust keyword"));
+}
+
+#[test]
+fn parse_field_arg_rejects_leading_underscore_field_name() {
+    assert!(puerto_toml::parse_field_arg("_hidden:String").is_err());
+}
+
+#[test]
+fn parse_field_arg_rejects_duplicate_enum_variants() {
+    let result = puerto_toml::parse_field_arg("status:Status:enum:Active/Active");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("duplicate enum variant"));
+}
+
+#[test]
+fn validate_rejects_hand_edited_system_field_name() {
+    let dir = temp_dir("validate_system_field");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("puerto.toml"),
+        r#"[project]
+name = "my-app"
+
+[[entity]]
+name = "Product"
+use_cases = ["create_product"]
+
+[[entity.fields]]
+name = "created_at"
+type = "DateTime<Utc>"
+"#,
+    )
+    .unwrap();
+
+    let result = validate::run_validate(&dir);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("reserved"));
+
+    cleanup(&dir);
+}
+
+#[test]
+fn validate_rejects_entity_name_that_collides_with_generated_code() {
+    let dir = temp_dir("validate_reserved_entity");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("puerto.toml"),
+        r#"[project]
+name = "my-app"
+
+[[entity]]
+name = "Error"
+use_cases = ["create_error"]
+"#,
+    )
+    .unwrap();
+
+    let result = validate::run_validate(&dir);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("collides"));
+
+    cleanup(&dir);
+}
+
+#[test]
+fn validate_rejects_conflicting_value_object_inner_types() {
+    let dir = temp_dir("validate_vo_conflict");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(
+        dir.join("puerto.toml"),
+        r#"[project]
+name = "my-app"
+
+[[entity]]
+name = "Product"
+use_cases = ["create_product"]
+
+[[entity.fields]]
+name = "code"
+type = "String"
+value_object = "Code"
+
+[[entity.fields]]
+name = "other_code"
+type = "i64"
+value_object = "Code"
+"#,
+    )
+    .unwrap();
+
+    let result = validate::run_validate(&dir);
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("declared twice"),
+        "one value_objects.rs cannot define Code as both String and i64"
+    );
+
+    cleanup(&dir);
+}
+
+#[test]
+fn scaffold_refuses_an_entity_name_that_collides_with_generated_code() {
+    let dir = temp_dir("scaffold_reserved_name");
+    cleanup(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let output = generate_project("reserved-name", &dir).unwrap();
+
+    let result = scaffold::run_scaffold(
+        "Logger",
+        &output,
+        Some("/bin/true"),
+        &[],
+        OverwritePolicy::Ask,
+    );
+
+    assert!(result.is_err());
+    assert!(
+        !output.join("business/src/domain/logger").is_dir(),
+        "nothing may be written for a refused name"
+    );
+
+    cleanup(&dir);
+}
+
+#[test]
+fn model_does_not_reimport_chrono_or_uuid_for_field_types() {
+    // model.tera imports chrono/uuid for the system fields; a DateTime/Uuid field must not
+    // re-import them (E0252: the name `DateTime` is defined multiple times).
+    let fields = vec![
+        puerto_toml::Field {
+            name: "released_at".into(),
+            field_type: "DateTime<Utc>".into(),
+            ..Default::default()
+        },
+        puerto_toml::Field {
+            name: "external_id".into(),
+            field_type: "Uuid".into(),
+            ..Default::default()
+        },
+    ];
+
+    let model = crate::generators::domain::generate_model("Product", "product", &fields, &[]);
+
+    assert_eq!(model.matches("use chrono::{DateTime, Utc};").count(), 1);
+    assert_eq!(model.matches("use uuid::Uuid;").count(), 1);
 }

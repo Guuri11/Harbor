@@ -1,3 +1,123 @@
+## [0.9.2] - 2026-08-15
+
+Two rounds of work: making generated projects actually compile, and making the CLI honour what the
+docs already promised. A compile matrix now gates both — it generates real projects, scaffolds into
+them and runs `cargo test --workspace` inside, which is how the bugs below were found.
+
+### 🐛 Fixed
+
+- **`Option<VO>` and `Vec<VO>` emitted model tests that did not compile** — the test-props builders
+  branched only on enum/plain VOs, so `Option<VO>` got `VO::new(None)` and `Vec<VO>` got
+  `VO::new(vec![])`, both with the wrong inner type
+- **`puerto new --no-demo` dropped `pub mod tags;`** from `presentation/src/api.rs`, breaking the
+  first scaffold into an empty project
+- **An entity with no use cases emitted syntactically invalid `bootstrap.rs`** (`EntityApi { , logger: … }`)
+- **`DateTime<Utc>` / `Uuid` fields re-imported chrono and uuid in the model** (E0252)
+- **`get` / `list` / `delete` test modules missed field-type imports** (E0433)
+- **DTOs used `DateTime` / `HashMap` with no import**, no chrono dependency and no poem-openapi
+  chrono feature
+- **`unique = true` never reached the SQL migration.** It is documented in `AGENTS.md`, exposed as
+  the `!` CLI suffix, and did nothing. Now emits `CREATE UNIQUE INDEX {table}_{field}_key` — a named
+  index rather than an inline column `UNIQUE`, so a later migration can drop it by a predictable
+  name. This also makes the `23505` → `EntityError::Duplicate` mapping in the Pg repository
+  reachable for the first time
+- **`puerto generate domain` could never receive typed fields.** A dead `find` guaranteed an empty
+  field list, and the entity was registered with `fields: []` — so `application`, `repository` and
+  `presentation`, which all read fields back from `puerto.toml`, were field-blind. The entire
+  documented domain-first workflow could only ever produce the default `name: String` entity
+
+### 🚀 Features
+
+- **`puerto generate scaffold` no longer overwrites silently.** Re-scaffolding an entity that has
+  generated files is refused: interactively it lists the files and asks, non-interactively it aborts
+  without writing a byte. `--force` overwrites and updates the `[[entity]]` block in place, so the
+  manifest keeps describing the code on disk — use cases added via `generate use-case` survive
+- **`puerto generate domain <Name> -- fields`** takes the same field syntax as `scaffold` and
+  persists the fields to `puerto.toml`, which is what makes the later layered commands field-aware
+- **Manifest / filesystem drift detection.** `puerto validate` now errors when a declared
+  `[[entity]]` has no code on disk (naming the missing paths and the command that fixes it) and
+  warns on the inverse — a domain module with no `[[entity]]` block. `puerto generate bootstrap`
+  refuses to write a bootstrap that will not compile; `--allow-missing` writes it anyway
+- **`puerto --version`.** The flag was documented in the install instructions and did not exist —
+  clap never generated it because `version` was absent from `#[command(...)]`
+- **Stricter name validation**, applied identically by the CLI parser and `puerto validate`:
+  system field names (`id`, `created_at`, `updated_at`, `deleted`, `deleted_at`), Rust keywords,
+  entity names that collide with generated code (`Error`, `String`, `Logger`, `Type`, …), duplicate
+  enum variants, and two fields declaring the same value object with different inner types
+
+### 🚜 Refactor
+
+- New `generators/conflict.rs` — the overwrite guard, checked before the first byte is written
+- New `generators/consistency.rs` — the manifest/filesystem pass, covering exactly the files
+  `bootstrap.rs` imports
+- New `validation.rs` — one home for `SYSTEM_FIELDS`, `RUST_KEYWORDS`, reserved type and module
+  names, and the name predicates. Called from `parse_field_arg`, from `run_validate` and before any
+  scaffold write, so the two can no longer diverge
+- The `-- fields` plumbing is a single `parse_cli_fields()` shared by `scaffold` and `domain`
+
+### ⚙️ CI
+
+- `make test/full` runs on every push and pull request, not only on tag push. It used to be
+  tag-only, which is how three separate bugs that produced non-compiling projects reached `main`
+- The compile matrix covers primitives, `Option`/`Vec` primitives, plain and unique value objects,
+  `Option`/`Vec`/enum/shared value objects, multiple entities, `--no-demo`, and the domain-first
+  layered flow with fields
+
+### 📚 Documentation
+
+- Swept the drift between the docs and the CLI: the `scaffold --db` flag that no longer exists, the
+  old `name:Name[vo:String]` value object syntax, `crates/template/basic/`, `scaffold.rs` described
+  as the home of the writers, and tests described as living in `main.rs`. Every `crates/`-relative
+  path in `AGENTS.md` and `.claude/rules/*` is now verified to exist
+- The landing docs now document that re-running `scaffold` is refused, and what `--force` does
+
+### 💥 Breaking
+
+- **Field names with a leading underscore are rejected.** `_private:String` used to parse. The
+  predicate allowed it while its own error message said otherwise, and a leading underscore reads as
+  "deliberately unused" to every Rust reader.
+- **Re-running `puerto generate scaffold <Name>` on an existing entity is refused** instead of
+  overwriting. Non-interactive callers (CI, scripts) now get a non-zero exit.
+- **`puerto generate bootstrap` refuses** when `puerto.toml` declares an entity whose code is not on
+  disk, instead of writing a file that does not compile.
+- **`puerto validate` fails on inputs it used to accept**: system field names, Rust keywords,
+  reserved entity names, duplicate enum variants, incoherent value objects, and declared-but-
+  unscaffolded entities.
+
+### Migration Guide
+
+Existing projects need no file changes. The commands are stricter, so adjust any automation:
+
+1. **Scripts that re-run `scaffold` to regenerate an entity** must pass `--force`:
+
+   ```bash
+   puerto generate scaffold Product --force -- name:String price:i64
+   ```
+
+   Without it the command exits non-zero and writes nothing.
+
+2. **Run `puerto validate` once** and fix what it reports. The new checks catch manifests that were
+   already producing code that does not compile:
+
+   - a field named `id` / `created_at` / `updated_at` / `deleted` / `deleted_at` → rename it; every
+     entity already has those
+   - a field named after a Rust keyword (`type`, `match`, `move`, …) → rename it
+   - a field name starting with `_` → rename it
+   - an entity named `Error`, `String`, `Logger`, `Type`, … → rename it
+   - an entity declared in `puerto.toml` but never scaffolded → run the command `validate` suggests,
+     or delete the `[[entity]]` block
+
+3. **If `puerto generate bootstrap` now refuses**, the manifest and the filesystem disagree. Fix the
+   drift it names. `--allow-missing` restores the old behaviour if you genuinely want the file
+   written anyway.
+
+4. **SQL projects with `unique = true` fields**: the constraint was never generated, so existing
+   tables do not have it. New scaffolds emit it. To add it to an existing table:
+
+   ```sql
+   CREATE UNIQUE INDEX products_sku_key ON products (sku);
+   ```
+
 ## [0.8.0] - 2026-05-04
 
 ### 🚀 Features

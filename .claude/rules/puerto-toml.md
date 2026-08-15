@@ -186,13 +186,17 @@ presentation/src/api/product/error_mapper.rs
 
 ## CLI Commands That Touch puerto.toml
 
-| Command                                      | Effect                                                                |
-| -------------------------------------------- | --------------------------------------------------------------------- |
-| `puerto new [--name] [--db]`                 | Creates puerto.toml from template with initial Greeting entity        |
-| `puerto generate scaffold <Name>`            | Appends `[[entity]]` block (`db` omitted), regenerates bootstrap.rs   |
-| `puerto generate scaffold <Name> --db`       | Appends `[[entity]]` block with `db = true`, regenerates bootstrap.rs |
-| `puerto generate scaffold <Name> name:Type`  | Appends `[[entity]]` block with `[[entity.fields]]`, regenerates       |
-| `puerto generate bootstrap`                  | Reads puerto.toml, regenerates bootstrap.rs (no other changes)        |
-| `puerto generate use-case <Entity> <action>` | Appends action to entity's `use_cases`, regenerates bootstrap.rs      |
-| `puerto generate migration <name>`           | Creates migration file — does not touch puerto.toml                   |
-| `puerto validate`                            | Validates puerto.toml: entity names, field names, field types, duplicates |
+| Command                                         | Effect                                                                            |
+| ----------------------------------------------- | --------------------------------------------------------------------------------- |
+| `puerto new [--name] [--db\|--no-db] [--no-demo]` | Creates puerto.toml from template with initial Greeting entity                    |
+| `puerto generate scaffold <Name>`               | Upserts the `[[entity]]` block, regenerates bootstrap.rs                          |
+| `puerto generate scaffold <Name> -- name:Type`  | Same, with `[[entity.fields]]` from the trailing arguments                        |
+| `puerto generate domain <Name> -- name:Type`    | Registers the entity **with its fields** so the later layered commands see them   |
+| `puerto generate bootstrap [--allow-missing]`   | Regenerates bootstrap.rs; refuses when a declared entity has no code on disk      |
+| `puerto generate use-case <Entity> <action>`    | Appends action to entity's `use_cases`, regenerates bootstrap.rs                  |
+| `puerto generate value-object <Name> <type>`    | Appends a `[[value_object]]` block                                                |
+| `puerto generate migration <name>`              | Creates migration file — does not touch puerto.toml                               |
+| `puerto validate`                               | Validates names, types, duplicates, and that every declared entity exists on disk |
+
+`db` is a **project-level** setting (`[project] db`), chosen once by `puerto new --db`. There is
+no `--db` flag on `generate scaffold`: it reads the project setting from puerto.toml.

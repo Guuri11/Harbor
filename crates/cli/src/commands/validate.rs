@@ -8,36 +8,12 @@ use crate::puerto_toml;
 const SHARED_VO_ALLOWED_INNER_TYPES: &[&str] =
     &["String", "i64", "bool", "f64", "Uuid", "DateTime<Utc>"];
 
-fn is_valid_entity_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_uppercase() {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric())
-}
-
 fn is_valid_use_case_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
     name.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
-fn is_valid_vo_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_uppercase() {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric())
 }
 
 const VO_ALLOWED_INNER_TYPES: &[&str] = &[
@@ -86,11 +62,8 @@ pub fn run_validate(cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut seen_entities: Vec<String> = vec![];
     for entity in &config.entity {
-        if !is_valid_entity_name(&entity.name) {
-            errors.push(format!(
-                "entity '{}': name must be PascalCase (uppercase letter followed by alphanumeric characters)",
-                entity.name
-            ));
+        if let Err(e) = crate::validation::validate_entity_name(&entity.name) {
+            errors.push(format!("entity '{}': {}", entity.name, e));
         }
 
         if seen_entities.contains(&entity.name) {
@@ -121,11 +94,8 @@ pub fn run_validate(cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            if !crate::puerto_toml::is_valid_field_name_pub(&field.name) {
-                errors.push(format!(
-                    "entity '{}': field '{}' is not valid snake_case (lowercase letters, digits, underscores; cannot start with digit)",
-                    entity.name, field.name
-                ));
+            if let Err(e) = crate::validation::validate_field_name(&field.name) {
+                errors.push(format!("entity '{}': {}", entity.name, e));
             }
 
             if seen_fields.contains(&field.name) {
@@ -151,10 +121,12 @@ pub fn run_validate(cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if is_value_object(field) {
-                if !is_valid_vo_name(field.value_object.as_deref().unwrap()) {
+                if let Err(e) =
+                    crate::validation::validate_vo_name(field.value_object.as_deref().unwrap())
+                {
                     errors.push(format!(
-                        "entity '{}': field '{}' has invalid value_object name '{}' — must be PascalCase",
-                        entity.name, field.name, field.value_object.as_deref().unwrap()
+                        "entity '{}': field '{}': {}",
+                        entity.name, field.name, e
                     ));
                 }
                 if is_enum_vo(field) {
@@ -171,19 +143,11 @@ pub fn run_validate(cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
                         ));
                     }
                     if let Some(variants) = &field.enum_variants {
-                        if variants.is_empty() {
+                        if let Err(e) = crate::validation::validate_enum_variants(variants) {
                             errors.push(format!(
-                                "entity '{}': field '{}' has empty enum_variants",
-                                entity.name, field.name
+                                "entity '{}': field '{}': {}",
+                                entity.name, field.name, e
                             ));
-                        }
-                        for variant in variants {
-                            if !is_valid_vo_name(variant) {
-                                errors.push(format!(
-                                    "entity '{}': field '{}' has invalid enum variant '{}' — must be PascalCase",
-                                    entity.name, field.name, variant
-                                ));
-                            }
                         }
                     }
                 } else {
@@ -214,15 +178,18 @@ pub fn run_validate(cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        // One `value_objects.rs` is written per entity — two fields cannot define the same VO
+        // with different inner types.
+        for e in crate::validation::validate_vo_coherence(&entity.fields, &config.value_object) {
+            errors.push(format!("entity '{}': {}", entity.name, e));
+        }
     }
 
     let mut seen_shared_vo_names: Vec<String> = vec![];
     for vo_def in &config.value_object {
-        if !is_valid_vo_name(&vo_def.name) {
-            errors.push(format!(
-                "shared value_object '{}': name must be PascalCase (uppercase letter followed by alphanumeric characters)",
-                vo_def.name
-            ));
+        if let Err(e) = crate::validation::validate_vo_name(&vo_def.name) {
+            errors.push(format!("shared value_object '{}': {}", vo_def.name, e));
         }
         if seen_shared_vo_names.contains(&vo_def.name) {
             errors.push(format!(
@@ -239,6 +206,20 @@ pub fn run_validate(cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 SHARED_VO_ALLOWED_INNER_TYPES.join(", ")
             ));
         }
+    }
+
+    // The manifest can be internally consistent and still describe code that is not there —
+    // `generate bootstrap` would then emit imports for modules that do not exist.
+    for line in crate::generators::consistency::drift_lines(
+        &crate::generators::consistency::missing_entity_files(cwd, &config),
+    ) {
+        errors.push(line);
+    }
+    for orphan in crate::generators::consistency::orphan_entity_dirs(cwd, &config) {
+        warnings.push(format!(
+            "'business/src/domain/{orphan}' exists but has no [[entity]] block — Puerto commands \
+             cannot see it"
+        ));
     }
 
     if !errors.is_empty() {

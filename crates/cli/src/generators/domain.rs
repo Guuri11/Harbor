@@ -16,6 +16,52 @@ use crate::puerto_toml::{Field, ValueObjectDefinition};
 
 use crate::generators::effective_fields;
 
+/// Imports `domain/model.tera` writes itself, for the always-present system fields. Field-derived
+/// imports matching these must not be emitted again.
+const MODEL_TEMPLATE_IMPORTS: &[&str] = &["use chrono::{DateTime, Utc};", "use uuid::Uuid;"];
+
+/// A single `EntityProps` field literal, e.g. `            tags: vec![],`.
+///
+/// **The one place that renders a Props field literal.** The four VO shapes (plain, `Option<VO>`,
+/// `Vec<VO>`, enum) must be handled in the same order everywhere: when the validation-test builders
+/// carried their own copy of this branching they omitted `Option`/`Vec`, emitting
+/// `Tag::new(vec![])` and `Mid::new(None)` — generated tests that did not compile.
+fn props_literal(f: &Field) -> String {
+    if is_option_vo(f) {
+        format!("            {}: None,", f.name)
+    } else if is_vec_vo(f) {
+        format!("            {}: vec![],", f.name)
+    } else if is_enum_vo(f) {
+        let vo = f.value_object.as_deref().unwrap();
+        let first_variant = f.enum_variants.as_deref().unwrap().first().unwrap();
+        format!("            {}: {}::{},", f.name, vo, first_variant)
+    } else if is_value_object(f) {
+        let mapping = resolve_type(&f.field_type).unwrap();
+        let vo = f.value_object.as_deref().unwrap();
+        format!(
+            "            {}: {}::new({}).expect(\"valid {}\"),",
+            f.name, vo, mapping.default_expr, vo
+        )
+    } else {
+        let mapping = resolve_type(&f.field_type).unwrap();
+        format!("            {}: {},", f.name, mapping.default_expr)
+    }
+}
+
+/// Every field of an `EntityProps` literal, one line each.
+///
+/// `override_field` replaces a single field's value — how the validation tests inject `""` /
+/// `"   "` into the field under test while every other field keeps a valid default.
+fn props_literal_lines(eff: &[Field], override_field: Option<(&str, &str)>) -> String {
+    eff.iter()
+        .map(|f| match override_field {
+            Some((name, value)) if f.name == name => format!("            {}: {},", f.name, value),
+            _ => props_literal(f),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn generate_model(
     pascal: &str,
     snake: &str,
@@ -29,6 +75,12 @@ pub fn generate_model(
         if let Ok(mapping) = resolve_type(&f.field_type) {
             if let Some(imp) = mapping.needs_import {
                 let stmt = format!("use {};", imp);
+                // `model.tera` already imports chrono and uuid for the system fields (`id`,
+                // `created_at`, …). A `DateTime<Utc>` or `Uuid` field would otherwise re-import
+                // them: E0252, the name is defined multiple times.
+                if MODEL_TEMPLATE_IMPORTS.contains(&stmt.as_str()) {
+                    continue;
+                }
                 if !extra_imports.contains(&stmt) {
                     extra_imports.push(stmt);
                 }
@@ -98,31 +150,7 @@ pub fn generate_model(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let valid_props_lines: Vec<String> = eff
-        .iter()
-        .map(|f| {
-            if is_option_vo(f) {
-                format!("            {}: None,", f.name)
-            } else if is_vec_vo(f) {
-                format!("            {}: vec![],", f.name)
-            } else if is_enum_vo(f) {
-                let vo = f.value_object.as_deref().unwrap();
-                let first_variant = f.enum_variants.as_deref().unwrap().first().unwrap();
-                format!("            {}: {}::{},", f.name, vo, first_variant)
-            } else if is_value_object(f) {
-                let mapping = resolve_type(&f.field_type).unwrap();
-                let vo = f.value_object.as_deref().unwrap();
-                format!(
-                    "            {}: {}::new({}).expect(\"valid {}\"),",
-                    f.name, vo, mapping.default_expr, vo
-                )
-            } else {
-                let mapping = resolve_type(&f.field_type).unwrap();
-                format!("            {}: {},", f.name, mapping.default_expr)
-            }
-        })
-        .collect();
-    let valid_props_str = valid_props_lines.join("\n");
+    let valid_props_str = props_literal_lines(&eff, None);
 
     let required_string_fields: Vec<&Field> = eff
         .iter()
@@ -143,7 +171,10 @@ pub fn generate_model(
         .iter()
         .find(|f| f.field_type == "String" && !is_value_object(f))
     {
-        format!("\n        assert_eq!(result.unwrap().{}, \"example\");", f.name)
+        format!(
+            "\n        assert_eq!(result.unwrap().{}, \"example\");",
+            f.name
+        )
     } else if !eff.is_empty() {
         "\n        assert!(result.is_ok());".to_string()
     } else {
@@ -153,64 +184,23 @@ pub fn generate_model(
     let mut validation_tests: Vec<String> = vec![];
     for sf in &required_string_fields {
         let field_name = sf.name.clone();
-        let empty_props: Vec<String> = eff
-            .iter()
-            .map(|f| {
-                if f.name == field_name {
-                    format!("            {}: \"\".into(),", f.name)
-                } else if is_enum_vo(f) {
-                    let vo = f.value_object.as_deref().unwrap();
-                    let first_variant = f.enum_variants.as_deref().unwrap().first().unwrap();
-                    format!("            {}: {}::{},", f.name, vo, first_variant)
-                } else if is_value_object(f) {
-                    let mapping = resolve_type(&f.field_type).unwrap();
-                    let vo = f.value_object.as_deref().unwrap();
-                    format!(
-                        "            {}: {}::new({}).expect(\"valid {}\"),",
-                        f.name, vo, mapping.default_expr, vo
-                    )
-                } else {
-                    let mapping = resolve_type(&f.field_type).unwrap();
-                    format!("            {}: {},", f.name, mapping.default_expr)
-                }
-            })
-            .collect();
         validation_tests.push(format!(
             "    #[test]\n    fn should_reject_{snake}_when_{field}_is_empty() {{\n        let result = {pascal}::new({pascal}Props {{\n{props}\n        }});\n        assert!(result.is_err());\n        assert_eq!(\n            result.unwrap_err().to_string(),\n            \"{snake}.validation_error.{field}_empty\"\n        );\n    }}",
             field = field_name,
-            props = empty_props.join("\n"),
+            props = props_literal_lines(&eff, Some((&field_name, "\"\".into()"))),
         ));
 
-        let ws_props: Vec<String> = eff
-            .iter()
-            .map(|f| {
-                if f.name == field_name {
-                    format!("            {}: \"   \".into(),", f.name)
-                } else if is_enum_vo(f) {
-                    let vo = f.value_object.as_deref().unwrap();
-                    let first_variant = f.enum_variants.as_deref().unwrap().first().unwrap();
-                    format!("            {}: {}::{},", f.name, vo, first_variant)
-                } else if is_value_object(f) {
-                    let mapping = resolve_type(&f.field_type).unwrap();
-                    let vo = f.value_object.as_deref().unwrap();
-                    format!(
-                        "            {}: {}::new({}).expect(\"valid {}\"),",
-                        f.name, vo, mapping.default_expr, vo
-                    )
-                } else {
-                    let mapping = resolve_type(&f.field_type).unwrap();
-                    format!("            {}: {},", f.name, mapping.default_expr)
-                }
-            })
-            .collect();
         validation_tests.push(format!(
             "    #[test]\n    fn should_reject_{snake}_when_{field}_is_only_whitespace() {{\n        let result = {pascal}::new({pascal}Props {{\n{props}\n        }});\n        assert!(result.is_err());\n    }}",
             field = field_name,
-            props = ws_props.join("\n"),
+            props = props_literal_lines(&eff, Some((&field_name, "\"   \".into()"))),
         ));
     }
 
-    for vf in eff.iter().filter(|f| is_value_object(f) && f.field_type == "String" && !is_enum_vo(f)) {
+    for vf in eff
+        .iter()
+        .filter(|f| is_value_object(f) && f.field_type == "String" && !is_enum_vo(f))
+    {
         let vo = vf.value_object.as_deref().unwrap();
         let snake_vo = pascal_to_snake(vo);
         let error_str = if is_shared_vo(vf, shared_vos) {
@@ -304,7 +294,11 @@ pub fn generate_mother(
                 let vo = f.value_object.as_deref().unwrap();
                 format!("    {}: Option<{}>,", f.name, vo)
             } else {
-                format!("    {}: Option<{}>,", f.name, mother_storage_type(&f.field_type))
+                format!(
+                    "    {}: Option<{}>,",
+                    f.name,
+                    mother_storage_type(&f.field_type)
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -486,9 +480,21 @@ pub fn generate_value_objects(
         let vo = f.value_object.as_deref().unwrap();
         if is_enum_vo(f) {
             let variants = f.enum_variants.as_deref().unwrap();
-            let variant_lines = variants.iter().map(|v| format!("    {},", v)).collect::<Vec<_>>().join("\n");
-            let from_str_arms = variants.iter().map(|v| format!("            \"{}\" => Ok(Self::{}),", v, v)).collect::<Vec<_>>().join("\n");
-            let as_str_arms = variants.iter().map(|v| format!("            Self::{} => \"{}\",", v, v)).collect::<Vec<_>>().join("\n");
+            let variant_lines = variants
+                .iter()
+                .map(|v| format!("    {},", v))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let from_str_arms = variants
+                .iter()
+                .map(|v| format!("            \"{}\" => Ok(Self::{}),", v, v))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let as_str_arms = variants
+                .iter()
+                .map(|v| format!("            Self::{} => \"{}\",", v, v))
+                .collect::<Vec<_>>()
+                .join("\n");
             let unknown_arm = format!("            _ => Err({pascal}Error::Invalid{vo}),");
             vo_structs.push(format!(
                 "#[derive(Debug, Clone, PartialEq)]\npub enum {vo} {{\n{variant_lines}\n}}\n\nimpl {vo} {{\n    pub fn from_str(s: &str) -> Result<Self, {pascal}Error> {{\n        match s {{\n{from_str_arms}\n{unknown_arm}\n        }}\n    }}\n\n    pub fn as_str(&self) -> &'static str {{\n        match self {{\n{as_str_arms}\n        }}\n    }}\n}}"
@@ -521,8 +527,6 @@ pub fn generate_value_objects(
     ctx.insert("vo_structs", &vo_structs_str);
     render("domain/value_objects.tera", &ctx).expect("value_objects.tera render failed")
 }
-
-
 
 pub fn generate_create_use_case_trait(pascal: &str, snake: &str, fields: &[Field]) -> String {
     let eff = effective_fields(fields);
@@ -614,7 +618,8 @@ pub fn generate_shared_value_objects(vos: &[ValueObjectDefinition]) -> String {
     let vo_structs_str = vo_structs.join("\n\n");
     let mut ctx = tera::Context::new();
     ctx.insert("vo_structs", &vo_structs_str);
-    render("domain/shared_value_objects.tera", &ctx).expect("shared_value_objects.tera render failed")
+    render("domain/shared_value_objects.tera", &ctx)
+        .expect("shared_value_objects.tera render failed")
 }
 
 #[allow(dead_code)]
@@ -715,7 +720,9 @@ pub fn write_domain_files(
     )?;
 
     let eff = effective_fields(fields);
-    let has_local_vo = eff.iter().any(|f| is_value_object(f) && !is_shared_vo(f, shared_vos));
+    let has_local_vo = eff
+        .iter()
+        .any(|f| is_value_object(f) && !is_shared_vo(f, shared_vos));
 
     let vo_fields: Vec<serde_json::Value> = eff
         .iter()
@@ -822,10 +829,22 @@ pub fn patch_mothers_lib(base: &Path, snake: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-pub fn run_generate_domain(name: &str, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// `puerto generate domain <Name> [-- fields]` — the first step of the domain-first workflow.
+///
+/// `cli_fields` are the trailing `-- name:Type` arguments, already parsed and type-checked.
+/// They are persisted to puerto.toml here, which is what makes the later layered commands
+/// (`application`, `repository`, `presentation`) field-aware: they all read their fields back
+/// from the manifest.
+pub fn run_generate_domain(
+    name: &str,
+    base: &Path,
+    cli_fields: &[Field],
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::puerto_toml::read(base)?;
     let pascal = to_pascal_case(name);
     let snake = pascal_to_snake(&pascal);
+
+    crate::validation::validate_entity_name(&pascal)?;
 
     if config.entity.iter().any(|e| e.name == pascal) {
         return Err(format!(
@@ -834,14 +853,13 @@ pub fn run_generate_domain(name: &str, base: &Path) -> Result<(), Box<dyn std::e
         .into());
     }
 
-    let fields: Vec<Field> = config
-        .entity
-        .iter()
-        .find(|e| e.name == pascal)
-        .map(|e| e.fields.clone())
-        .unwrap_or_default();
-
+    let fields: Vec<Field> = cli_fields.to_vec();
     let shared_vos = config.value_object.clone();
+
+    let vo_conflicts = crate::validation::validate_vo_coherence(&fields, &shared_vos);
+    if !vo_conflicts.is_empty() {
+        return Err(vo_conflicts.join("\n  ").into());
+    }
 
     write_domain_files(&pascal, &snake, base, &fields, &shared_vos)?;
     write_mother(&pascal, &snake, base, &fields, &shared_vos)?;
@@ -869,7 +887,7 @@ pub fn run_generate_domain(name: &str, base: &Path) -> Result<(), Box<dyn std::e
         format!("update_{snake}"),
         format!("delete_{snake}"),
     ];
-    crate::puerto_toml::add_entity(base, &pascal, use_cases, config.project.db, vec![])?;
+    crate::puerto_toml::add_entity(base, &pascal, use_cases, config.project.db, fields.clone())?;
 
     if has_local_vo {
         println!(

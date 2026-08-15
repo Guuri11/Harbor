@@ -40,7 +40,7 @@ pub async fn build_app() -> impl poem::Endpoint {
 {% for uc in entity.use_cases -%}
     let {{ uc.action }} = Arc::new({{ uc.uc_pascal }}UseCaseImpl { repository: {{ uc.repo_expr }}, logger: Arc::clone(&logger) });
 {% endfor -%}
-    let {{ entity.api_var }} = {{ entity.pascal }}Api { {{ entity.use_case_fields }}, logger: Arc::clone(&logger) };
+    let {{ entity.api_var }} = {{ entity.pascal }}Api { {{ entity.api_struct_fields }} };
 
 {% endfor -%}
     let port = std::env::var("SERVICE_PORT").unwrap_or_else(|_| "8080".to_string());

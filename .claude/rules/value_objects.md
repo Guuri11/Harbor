@@ -138,20 +138,20 @@ pub struct ValueObjectDefinition {
 ### Parsing examples
 
 ```
-parse_field_arg("name:Name[vo:String]")
+parse_field_arg("name:Name:String")
 → Field { name: "name", field_type: "String", value_object: Some("Name"), .. }
 
-parse_field_arg("middle_name:MiddleName[vo:Option<String>]")
+parse_field_arg("middle_name:MiddleName:opt:String")
 → Field { name: "middle_name", field_type: "Option<String>", value_object: Some("MiddleName"), .. }
 
-parse_field_arg("tags:Tag[vo:Vec<String>]")
+parse_field_arg("tags:Tag:vec:String")
 → Field { name: "tags", field_type: "Vec<String>", value_object: Some("Tag"), .. }
 
-parse_field_arg("status:Status[enum:Active,Inactive]")
+parse_field_arg("status:Status:enum:Active/Inactive")
 → Field { name: "status", field_type: "String", value_object: Some("Status"),
           value_object_kind: Some("enum"), enum_variants: Some(["Active", "Inactive"]) }
 
-parse_field_arg("sku:Sku[vo:String]!")
+parse_field_arg("sku:Sku:String!")
 → Field { name: "sku", field_type: "String", unique: true, value_object: Some("Sku"), .. }
 
 parse_field_arg("price:i64")
@@ -487,7 +487,7 @@ Generated at `business/src/domain/shared/value_objects.rs`. Each shared VO has i
 | `business/src/lib.rs` | **PATCH** — `pub mod value_objects;` in entity block |
 | `business/src/application/{snake}/create_{snake}.rs` | **MODIFY** — VO construction |
 | `business/src/application/{snake}/update_{snake}.rs` | **MODIFY** — VO construction |
-| `business/tests/mothers/{snake}_mother.rs` | **MODIFY** — VO types in builder |
+| `business/src/tests/mothers/{snake}_mother.rs` | **MODIFY** — VO types in builder |
 | `infrastructure/src/{snake}/entity.rs` | **MODIFY** — TryFrom/From with VOs |
 | `presentation/src/api/{snake}/dto.rs` | **MODIFY** — `.value()` / `.as_str()` in `from_domain()` |
 
@@ -507,14 +507,14 @@ Generated at `business/src/domain/shared/value_objects.rs`. Each shared VO has i
 - ✅ Full layer penetration (domain → application → infrastructure → presentation)
 - ✅ Object Mother integration
 - ✅ `puerto validate` checks VO field constraints
-- ✅ CLI parsing: `name:Name[vo:String]`, `sku:Sku[vo:String]!`
+- ✅ CLI parsing: `name:Name:String`, `sku:Sku:String!`
 - ✅ 40+ VO-specific tests
 
 ## V2 Scope — COMPLETE
 
-- ✅ `Option<VO>` support (nullable VO fields): `middle_name:MiddleName[vo:Option<String>]`
-- ✅ `Vec<VO>` support (array VO fields): `tags:Tag[vo:Vec<String>]`
-- ✅ Enum VOs: `status:Status[enum:Active,Inactive,Suspended]`
+- ✅ `Option<VO>` support (nullable VO fields): `middle_name:MiddleName:opt:String`
+- ✅ `Vec<VO>` support (array VO fields): `tags:Tag:vec:String`
+- ✅ Enum VOs: `status:Status:enum:Active/Inactive/Suspended`
 - ✅ Shared/common VOs (`[[value_object]]` in `puerto.toml`, reusable across entities)
 - ✅ 60+ additional tests across all new VO kinds
 
@@ -525,6 +525,6 @@ Generated at `business/src/domain/shared/value_objects.rs`. Each shared VO has i
 ## Future Scope (V3+)
 
 - ✅ Snippet generation for VO patterns (`puerto generate snippets` extended for VOs) — `vo-string`, `vo-numeric`, `vo-enum`, `vo-option-construct`, `vo-vec-construct`
-- Custom validation rules in CLI (e.g., `name:Name[vo:String,min:2,max:50]`)
+- Custom validation rules in CLI (e.g., a `min`/`max` modifier on `name:Name:String`)
 - Domain events
 - Unit of Work pattern

@@ -102,7 +102,10 @@ fn build_update_params(eff: &[Field]) -> String {
         let value = if f.field_type == "String" {
             enum_or_string(f, "updated")
         } else {
-            resolve_type(&f.field_type).unwrap().default_expr.to_string()
+            resolve_type(&f.field_type)
+                .unwrap()
+                .default_expr
+                .to_string()
         };
         lines.push(format!("            {}: {},", f.name, value));
     }
@@ -118,7 +121,10 @@ fn build_empty_update_params(eff: &[Field], empty_field: &str) -> String {
             let value = if f.field_type == "String" {
                 enum_or_string(f, "updated")
             } else {
-                resolve_type(&f.field_type).unwrap().default_expr.to_string()
+                resolve_type(&f.field_type)
+                    .unwrap()
+                    .default_expr
+                    .to_string()
             };
             lines.push(format!("            {}: {},", f.name, value));
         }
@@ -159,7 +165,46 @@ fn build_test_vo_imports_block(
     }
 }
 
-fn build_extra_imports(eff: &[Field], snake: &str, shared_vos: &[ValueObjectDefinition]) -> Vec<String> {
+/// Test-module imports for the read/delete use cases.
+///
+/// Their templates carry no file-level `extra_imports` (the impls themselves need none), but their
+/// generated test modules build full `EntityProps` literals — so a `HashMap<String, String>`,
+/// `Uuid` or `DateTime<Utc>` field needs its type in scope *inside* `mod tests`. Without this a
+/// `meta:map` field produced `meta: HashMap::new()` against an undeclared type (E0433).
+fn build_test_imports_block(
+    eff: &[Field],
+    snake: &str,
+    shared_vos: &[ValueObjectDefinition],
+) -> String {
+    let mut imports: Vec<String> = vec![];
+    for f in eff {
+        if let Ok(mapping) = resolve_type(&f.field_type) {
+            if let Some(imp) = mapping.needs_import {
+                let stmt = format!("    use {};", imp);
+                if !imports.contains(&stmt) {
+                    imports.push(stmt);
+                }
+            }
+        }
+    }
+    for f in eff.iter().filter(|f| is_value_object(f)) {
+        let stmt = format!("    use {};", vo_import_path(f, snake, shared_vos));
+        if !imports.contains(&stmt) {
+            imports.push(stmt);
+        }
+    }
+    if imports.is_empty() {
+        String::new()
+    } else {
+        imports.join("\n") + "\n"
+    }
+}
+
+fn build_extra_imports(
+    eff: &[Field],
+    snake: &str,
+    shared_vos: &[ValueObjectDefinition],
+) -> Vec<String> {
     let mut imports: Vec<String> = vec![];
     for f in eff {
         if let Ok(mapping) = resolve_type(&f.field_type) {
@@ -230,21 +275,31 @@ fn build_create_context(
 
     let valid_params = build_create_params_vo(&eff);
 
-    let valid_assertion =
-        if let Some(f) = eff.iter().find(|f| f.field_type == "String" && !is_value_object(f)) {
-            format!("\n        assert_eq!(result.unwrap().{}, \"example\");", f.name)
-        } else if let Some(f) = eff.iter().find(|f| is_value_object(f) && f.field_type == "String")
-        {
-            format!(
-                "\n        assert_eq!(result.unwrap().{}.value(), \"example\");",
-                f.name
-            )
-        } else {
-            String::new()
-        };
+    let valid_assertion = if let Some(f) = eff
+        .iter()
+        .find(|f| f.field_type == "String" && !is_value_object(f))
+    {
+        format!(
+            "\n        assert_eq!(result.unwrap().{}, \"example\");",
+            f.name
+        )
+    } else if let Some(f) = eff
+        .iter()
+        .find(|f| is_value_object(f) && f.field_type == "String")
+    {
+        format!(
+            "\n        assert_eq!(result.unwrap().{}.value(), \"example\");",
+            f.name
+        )
+    } else {
+        String::new()
+    };
 
     let mut validation_test_cases: Vec<serde_json::Value> = vec![];
-    for sf in eff.iter().filter(|f| f.field_type == "String" && !is_value_object(f)) {
+    for sf in eff
+        .iter()
+        .filter(|f| f.field_type == "String" && !is_value_object(f))
+    {
         let empty_params = build_empty_create_params(&eff, &sf.name);
         validation_test_cases.push(json!({
             "test_name": format!("should_return_error_when_{}_is_empty", sf.name),
@@ -252,7 +307,10 @@ fn build_create_context(
             "error_str": format!("{snake}.validation_error.{}_empty", sf.name),
         }));
     }
-    for vf in eff.iter().filter(|f| is_value_object(f) && f.field_type == "String") {
+    for vf in eff
+        .iter()
+        .filter(|f| is_value_object(f) && f.field_type == "String")
+    {
         let vo = vf.value_object.as_deref().unwrap();
         let vo_snake = pascal_to_snake(vo);
         let empty_params = build_empty_create_params(&eff, &vf.name);
@@ -286,10 +344,11 @@ fn build_get_context(
 ) -> tera::Context {
     let eff = effective_fields(fields);
     let props_fields = build_test_props(&eff, "example");
-    let test_vo_imports = build_test_vo_imports_block(&eff, snake, shared_vos);
+    let test_vo_imports = build_test_imports_block(&eff, snake, shared_vos);
 
-    let found_assertion = if let Some(f) =
-        eff.iter().find(|f| f.field_type == "String" && !is_value_object(f))
+    let found_assertion = if let Some(f) = eff
+        .iter()
+        .find(|f| f.field_type == "String" && !is_value_object(f))
     {
         format!(
             "\n        assert_eq!(result.unwrap().{}, \"example\");",
@@ -325,7 +384,7 @@ fn build_list_context(
     let eff = effective_fields(fields);
     let first_props = build_test_props(&eff, "first");
     let second_props = build_test_props(&eff, "second");
-    let test_vo_imports = build_test_vo_imports_block(&eff, snake, shared_vos);
+    let test_vo_imports = build_test_imports_block(&eff, snake, shared_vos);
 
     let mut ctx = tera::Context::new();
     ctx.insert("pascal", pascal);
@@ -356,7 +415,10 @@ fn build_update_context(
                 }
             }
         }
-        for f in eff.iter().filter(|f| is_value_object(f) && f.field_type != "Uuid") {
+        for f in eff
+            .iter()
+            .filter(|f| is_value_object(f) && f.field_type != "Uuid")
+        {
             let stmt = format!("use {};", vo_import_path(f, snake, shared_vos));
             if !imp.contains(&stmt) {
                 imp.push(stmt);
@@ -420,7 +482,10 @@ fn build_update_context(
         .iter()
         .find(|f| is_value_object(f) && f.field_type == "String" && !is_enum_vo(f))
     {
-        format!("assert_eq!(result.unwrap().{}.value(), \"updated\");", f.name)
+        format!(
+            "assert_eq!(result.unwrap().{}.value(), \"updated\");",
+            f.name
+        )
     } else {
         "assert!(result.is_ok());".to_string()
     };
@@ -472,7 +537,7 @@ fn build_delete_context(
 ) -> tera::Context {
     let eff = effective_fields(fields);
     let props_fields = build_test_props(&eff, "example");
-    let test_vo_imports = build_test_vo_imports_block(&eff, snake, shared_vos);
+    let test_vo_imports = build_test_imports_block(&eff, snake, shared_vos);
 
     let mut ctx = tera::Context::new();
     ctx.insert("pascal", pascal);
@@ -554,9 +619,7 @@ pub fn write_application_files(
         &generate_get_use_case_impl(pascal, snake, fields, shared_vos),
     )?;
     write_file(
-        &base.join(format!(
-            "business/src/application/{snake}/list_{snake}.rs"
-        )),
+        &base.join(format!("business/src/application/{snake}/list_{snake}.rs")),
         &generate_list_use_case_impl(pascal, snake, fields, shared_vos),
     )?;
     write_file(
@@ -574,10 +637,7 @@ pub fn write_application_files(
     Ok(())
 }
 
-pub fn run_generate_application(
-    name: &str,
-    base: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_generate_application(name: &str, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::puerto_toml::read(base)?;
     let pascal = to_pascal_case(name);
     let snake = pascal_to_snake(&pascal);

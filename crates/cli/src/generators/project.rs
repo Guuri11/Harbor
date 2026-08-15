@@ -238,8 +238,14 @@ pub fn apply_no_demo(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Minimal infrastructure lib.rs: logger only.
     fs::write(base.join("infrastructure/src/lib.rs"), "pub mod logger;\n")?;
 
-    // Minimal presentation api.rs: error only.
-    fs::write(base.join("presentation/src/api.rs"), "pub mod error;\n")?;
+    // Minimal presentation api.rs. `tags` must survive the demo strip: `regenerate_bootstrap`
+    // always writes `api/tags.rs`, and every generated `routes.rs` does
+    // `use crate::api::tags::ApiTags;` — dropping the declaration made the first scaffold into a
+    // `--no-demo` project fail to compile (E0432).
+    fs::write(
+        base.join("presentation/src/api.rs"),
+        "pub mod error;\npub mod tags;\n",
+    )?;
 
     // Clear entities in puerto.toml.
     let mut config = crate::puerto_toml::read(base)?;

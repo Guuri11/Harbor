@@ -4,6 +4,7 @@ mod patchers;
 mod puerto_toml;
 mod scaffold;
 mod snippets;
+mod validation;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -15,7 +16,11 @@ pub(crate) static TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/template
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "puerto", about = "Puerto — Rust full-stack DDD framework")]
+#[command(
+    name = "puerto",
+    version,
+    about = "Puerto — Rust full-stack DDD framework"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -63,6 +68,9 @@ enum GenerateAction {
     Scaffold {
         /// Entity name in PascalCase (e.g. Product, OrderItem)
         name: String,
+        /// Overwrite an already-generated entity, discarding hand-written changes in its files
+        #[arg(long)]
+        force: bool,
         /// Fields after -- separator. Primitives: title:String price:i64! desc:opt:String tags:vec:String
         /// Value Objects: name:Name:String age:Age:i64 status:Status:enum:Active/Inactive mid:Mid:opt:String
         /// Shared VO (type inferred from puerto.toml): email:Email
@@ -77,7 +85,11 @@ enum GenerateAction {
         action: String,
     },
     /// Regenerate presentation/src/generated/bootstrap.rs from puerto.toml
-    Bootstrap,
+    Bootstrap {
+        /// Write the file even when puerto.toml declares entities whose code is not on disk
+        #[arg(long)]
+        allow_missing: bool,
+    },
     /// Create a new SQLx migration file
     Migration {
         /// Migration name in snake_case (e.g. add_products_table)
@@ -93,6 +105,10 @@ enum GenerateAction {
     Domain {
         /// Entity name in PascalCase (e.g. Product, OrderItem)
         name: String,
+        /// Fields after -- separator. Same syntax as `generate scaffold`. They are written to
+        /// puerto.toml, so `generate application/repository/presentation` pick them up.
+        #[arg(raw = true)]
+        fields: Vec<String>,
     },
     /// Scaffold only the application layer for an existing entity
     Application {
@@ -116,6 +132,28 @@ enum GenerateAction {
         /// Inner primitive type: String, i64, bool, f64, Uuid, DateTime
         inner_type: String,
     },
+}
+
+// ── Shared CLI plumbing ───────────────────────────────────────────────────────
+
+/// Parse the trailing `-- name:Type …` arguments into validated `Field`s.
+///
+/// Shared by `generate scaffold` and `generate domain` so the two cannot drift: parse, resolve
+/// shared-VO type inference against puerto.toml, then type-check against the registry.
+fn parse_cli_fields(
+    cwd: &std::path::Path,
+    raw: &[String],
+) -> Result<Vec<puerto_toml::Field>, Box<dyn std::error::Error>> {
+    let mut parsed: Vec<puerto_toml::Field> = raw
+        .iter()
+        .map(|s| puerto_toml::parse_field_arg(s))
+        .collect::<Result<_, _>>()?;
+
+    if let Ok(config) = puerto_toml::read(cwd) {
+        parsed = puerto_toml::apply_shared_vo_inference(parsed, &config.value_object);
+    }
+    generators::types::validate_fields(&parsed)?;
+    Ok(parsed)
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -145,32 +183,22 @@ fn main() {
             println!("Add an entity with:    puerto generate scaffold <Name>");
         }),
         Commands::Generate {
-            action: GenerateAction::Scaffold { name, fields },
+            action:
+                GenerateAction::Scaffold {
+                    name,
+                    force,
+                    fields,
+                },
         } => {
             let cwd = std::env::current_dir().expect("cannot read current directory");
-            let mut parsed_fields: Vec<crate::puerto_toml::Field> = match fields
-                .iter()
-                .map(|s| crate::puerto_toml::parse_field_arg(s))
-                .collect::<Result<_, _>>()
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
+            let policy = if force {
+                crate::generators::conflict::OverwritePolicy::Force
+            } else {
+                crate::generators::conflict::OverwritePolicy::Ask
             };
-            if let Ok(config) = crate::puerto_toml::read(&cwd) {
-                parsed_fields = crate::puerto_toml::apply_shared_vo_inference(
-                    parsed_fields,
-                    &config.value_object,
-                );
-            }
-            if let Err(e) = crate::generators::types::validate_fields(&parsed_fields) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
             commands::list::require_puerto_project(&cwd)
-                .and_then(|_| scaffold::run_scaffold(&name, &cwd, None, &parsed_fields))
+                .and_then(|_| parse_cli_fields(&cwd, &fields))
+                .and_then(|parsed| scaffold::run_scaffold(&name, &cwd, None, &parsed, policy))
         }
         Commands::Generate {
             action: GenerateAction::UseCase { entity, action },
@@ -180,13 +208,11 @@ fn main() {
                 .and_then(|_| scaffold::run_use_case(&entity, &action, &cwd))
         }
         Commands::Generate {
-            action: GenerateAction::Bootstrap,
+            action: GenerateAction::Bootstrap { allow_missing },
         } => {
             let cwd = std::env::current_dir().expect("cannot read current directory");
-            commands::list::require_puerto_project(&cwd).and_then(|_| {
-                scaffold::regenerate_bootstrap(&cwd)
-                    .map(|_| println!("✓ bootstrap.rs regenerated."))
-            })
+            commands::list::require_puerto_project(&cwd)
+                .and_then(|_| scaffold::run_bootstrap_command(&cwd, allow_missing))
         }
         Commands::Generate {
             action: GenerateAction::Migration { name },
@@ -203,11 +229,12 @@ fn main() {
                 .and_then(|_| snippets::run(&cwd, ide.as_deref()))
         }
         Commands::Generate {
-            action: GenerateAction::Domain { name },
+            action: GenerateAction::Domain { name, fields },
         } => {
             let cwd = std::env::current_dir().expect("cannot read current directory");
             commands::list::require_puerto_project(&cwd)
-                .and_then(|_| scaffold::run_generate_domain(&name, &cwd))
+                .and_then(|_| parse_cli_fields(&cwd, &fields))
+                .and_then(|parsed| scaffold::run_generate_domain(&name, &cwd, &parsed))
         }
         Commands::Generate {
             action: GenerateAction::Application { name },

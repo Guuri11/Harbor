@@ -89,13 +89,15 @@ pub fn parse_field_arg(s: &str) -> Result<Field, String> {
     }
 
     let name = parts[0].to_string();
-    if !is_valid_field_name(&name) {
-        return Err(format!(
-            "invalid field name '{}'. Must be snake_case (lowercase letters, digits, underscores, not starting with a digit)",
-            name
-        ));
-    }
+    crate::validation::validate_field_name(&name)?;
 
+    let field = parse_field_shape(s, name, &parts, unique)?;
+    // Fail at the command that caused it, not at `cargo build` inside the generated project.
+    crate::validation::validate_field(&field)?;
+    Ok(field)
+}
+
+fn parse_field_shape(s: &str, name: String, parts: &[&str], unique: bool) -> Result<Field, String> {
     match parts.len() {
         1 => unreachable!("handled above"),
         2 => {
@@ -220,31 +222,7 @@ fn expand_type(t: &str) -> String {
 }
 
 fn is_valid_vo_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_uppercase() {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric())
-}
-
-fn is_valid_field_name(name: &str) -> bool {
-    is_valid_field_name_pub(name)
-}
-
-pub fn is_valid_field_name_pub(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_lowercase() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    crate::validation::is_pascal_case(name)
 }
 
 // ── I/O helpers ───────────────────────────────────────────────────────────────
@@ -261,7 +239,15 @@ pub fn write(base: &Path, config: &PuertoConfig) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Append a new entity to puerto.toml. No-op if entity already present.
+/// Insert the entity, or update it in place if already present.
+///
+/// Upsert rather than no-op: re-scaffolding an entity with a different field list used to leave
+/// puerto.toml describing the *old* fields while the code on disk had the new ones — a divergence
+/// neither `puerto validate` nor `puerto generate bootstrap` could see, in the one file documented
+/// as the source of truth.
+///
+/// Use cases are **merged**, not replaced: actions added by `puerto generate use-case` survive a
+/// re-scaffold. Fields are replaced — they are what the caller just regenerated the code from.
 pub fn add_entity(
     base: &Path,
     name: &str,
@@ -270,15 +256,23 @@ pub fn add_entity(
     fields: Vec<Field>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = read(base)?;
-    if config.entity.iter().any(|e| e.name == name) {
-        return Ok(());
+    match config.entity.iter_mut().find(|e| e.name == name) {
+        Some(existing) => {
+            for uc in use_cases {
+                if !existing.use_cases.contains(&uc) {
+                    existing.use_cases.push(uc);
+                }
+            }
+            existing.db = db;
+            existing.fields = fields;
+        }
+        None => config.entity.push(Entity {
+            name: name.to_string(),
+            use_cases,
+            db,
+            fields,
+        }),
     }
-    config.entity.push(Entity {
-        name: name.to_string(),
-        use_cases,
-        db,
-        fields,
-    });
     write(base, &config)
 }
 

@@ -1,9 +1,13 @@
 use std::path::Path;
 
+use crate::generators::conflict::{OverwritePolicy, guard_entity_overwrite};
 use crate::generators::types::{is_shared_vo, is_value_object};
 use crate::generators::{
     application::{generate_create_use_case_impl, write_application_files},
-    domain::{generate_create_use_case_trait, generate_model, patch_mothers_lib, write_domain_files, write_mother},
+    domain::{
+        generate_create_use_case_trait, generate_model, patch_mothers_lib, write_domain_files,
+        write_mother,
+    },
     infrastructure::{generate_infra_entity, write_repository_files},
     migration::run_migration,
     naming::{pascal_to_snake, to_pascal_case, write_file},
@@ -14,7 +18,6 @@ use crate::patchers::lib_rs::{
     patch_business_lib_shared, patch_business_lib_value_objects, try_patch_libs,
 };
 use crate::puerto_toml::{Field, ValueObjectDefinition};
-
 
 // ── Single use case (non-CRUD) ────────────────────────────────────────────────
 
@@ -86,26 +89,40 @@ fn write_files(
         "pub mod dto;\npub mod error_mapper;\npub mod responses;\npub mod routes;\n",
     )?;
     {
-        use crate::generators::presentation::{build_dto_ctx, build_error_mapper_ctx, build_simple_ctx};
+        use crate::generators::presentation::{
+            build_dto_ctx, build_error_mapper_ctx, build_simple_ctx,
+        };
         write_file(
             &base.join(format!("presentation/src/api/{snake}/dto.rs")),
-            &render("presentation/dto.tera", &build_dto_ctx(pascal, snake, &[], false))
-                .expect("presentation/dto.tera render failed"),
+            &render(
+                "presentation/dto.tera",
+                &build_dto_ctx(pascal, snake, &[], false),
+            )
+            .expect("presentation/dto.tera render failed"),
         )?;
         write_file(
             &base.join(format!("presentation/src/api/{snake}/responses.rs")),
-            &render("presentation/responses_simple.tera", &build_simple_ctx(pascal, snake))
-                .expect("presentation/responses_simple.tera render failed"),
+            &render(
+                "presentation/responses_simple.tera",
+                &build_simple_ctx(pascal, snake),
+            )
+            .expect("presentation/responses_simple.tera render failed"),
         )?;
         write_file(
             &base.join(format!("presentation/src/api/{snake}/error_mapper.rs")),
-            &render("presentation/error_mapper.tera", &build_error_mapper_ctx(pascal, snake, &[]))
-                .expect("presentation/error_mapper.tera render failed"),
+            &render(
+                "presentation/error_mapper.tera",
+                &build_error_mapper_ctx(pascal, snake, &[]),
+            )
+            .expect("presentation/error_mapper.tera render failed"),
         )?;
         write_file(
             &base.join(format!("presentation/src/api/{snake}/routes.rs")),
-            &render("presentation/routes_simple.tera", &build_simple_ctx(pascal, snake))
-                .expect("presentation/routes_simple.tera render failed"),
+            &render(
+                "presentation/routes_simple.tera",
+                &build_simple_ctx(pascal, snake),
+            )
+            .expect("presentation/routes_simple.tera render failed"),
         )?;
     }
     Ok(())
@@ -210,11 +227,14 @@ pub fn run(
 /// Reads `project.db` from `puerto.toml`, always generates full CRUD.
 /// `sqlx_bin` overrides the sqlx binary path (pass `None` in production, `Some("/bin/true")` in tests).
 /// `cli_fields` are fields passed from the CLI (e.g. `title:String price:i64`).
+///
+/// Refuses to overwrite an already-generated entity unless `--force`; see `conflict.rs`.
 pub fn run_scaffold(
     name: &str,
     base: &Path,
     sqlx_bin: Option<&str>,
     cli_fields: &[Field],
+    overwrite: OverwritePolicy,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::puerto_toml::read(base)?;
     let db = config.project.db;
@@ -230,6 +250,16 @@ pub fn run_scaffold(
             .map(|e| e.fields.clone())
             .unwrap_or_default()
     };
+
+    // Checked before the first byte is written — a half-overwritten project is worse than a
+    // refused command.
+    crate::validation::validate_entity_name(&pascal)?;
+    let vo_conflicts = crate::validation::validate_vo_coherence(&fields, &shared_vos);
+    if !vo_conflicts.is_empty() {
+        return Err(vo_conflicts.join("\n  ").into());
+    }
+    guard_entity_overwrite(base, &pascal_to_snake(&pascal), db, overwrite)?;
+
     run(name, base, db, true, &fields, &shared_vos)?;
     if db {
         let snake = pascal_to_snake(&pascal);
